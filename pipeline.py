@@ -74,7 +74,7 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
     fetch_errors = 0
     for ref in [r for r in discovered if r.url in to_process]:
         polite_sleep(cfg.request_delay_seconds)
-        article = fetch_article(ref.url, fetch_image=True)
+        article = fetch_article(ref.url, fetch_image=True, source=ref.source)
         if not article:
             fetch_errors += 1
             continue
@@ -114,6 +114,7 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
                 "author": a.author,
                 "published_at": a.published_at,
                 "url": a.url,
+                "source": a.source,
                 "body_text": a.body_text,
             }
             for a in fetched_articles
@@ -138,6 +139,7 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
             published_at=article.published_at,
             summary=summary or "(no summary)",
             category=category,
+            source=article.source,
         )
 
         # If Gemini said SKIP, send only the photo+caption (no summary text)
@@ -146,7 +148,8 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
             if send_article(
                 {"title": article.title, "author": article.author,
                  "published_at": article.published_at, "url": article.url,
-                 "image_url": article.image_url, "image_bytes": article.image_bytes},
+                 "image_url": article.image_url, "image_bytes": article.image_bytes,
+                 "source": article.source},
                 summary=None,
                 category=category,
             ):
@@ -166,6 +169,7 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
             "url": article.url,
             "image_url": article.image_url,
             "image_bytes": article.image_bytes,
+            "source": article.source,
         }
         if send_article(article_dict, summary, category=category):
             sent += 1

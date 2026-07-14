@@ -22,9 +22,15 @@ def _connect() -> sqlite3.Connection:
             last_checked  TEXT,
             summary       TEXT,
             category      TEXT,
-            lastmod       TEXT
+            lastmod       TEXT,
+            source        TEXT
         )
     """)
+    # Migration: add `source` column to pre-existing databases (idempotent)
+    try:
+        conn.execute("ALTER TABLE articles ADD COLUMN source TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS runs (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +98,7 @@ def record_article(
     summary: str,
     category: str | None = None,
     lastmod: str | None = None,
+    source: str = "",
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as conn:
@@ -99,8 +106,8 @@ def record_article(
             """
             INSERT INTO articles
                 (url, title, author, published_at, first_seen_at, last_checked,
-                 summary, category, lastmod)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 summary, category, lastmod, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(url) DO UPDATE SET
                 title=excluded.title,
                 author=excluded.author,
@@ -108,9 +115,10 @@ def record_article(
                 last_checked=excluded.last_checked,
                 summary=excluded.summary,
                 category=excluded.category,
-                lastmod=excluded.lastmod
+                lastmod=excluded.lastmod,
+                source=excluded.source
             """,
-            (url, title, author, published_at, now, now, summary, category, lastmod),
+            (url, title, author, published_at, now, now, summary, category, lastmod, source),
         )
 
 
@@ -185,7 +193,7 @@ def get_recent_articles(limit: int = 20) -> list[dict]:
     with _connect() as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT url, title, author, published_at, first_seen_at, category "
+            "SELECT url, title, author, published_at, first_seen_at, category, source "
             "FROM articles ORDER BY first_seen_at DESC LIMIT ?",
             (limit,),
         ).fetchall()

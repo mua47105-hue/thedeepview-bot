@@ -1,15 +1,16 @@
 """
-Gemini 3.5 Flash wrapper — batched summarization in ONE API call.
+Gemini 2.5 Flash wrapper — batched summarization in ONE API call.
 
 Strategy:
 - All new articles from a single pipeline run go into ONE prompt
 - Gemini classifies each (model_launch / infra_upgrade / core_logic /
   functional_update / research / policy / business / other)
 - For model launches: extracts company, model name, benchmarks,
-  abilities, pricing, availability
-- For other categories: produces a focused summary
+  abilities, pricing, availability, technical architecture
+- For other categories: produces a focused but DETAILED summary
 - Pure opinion/culture pieces are skipped via [SKIPPED] marker
 - One call = one quota unit regardless of article count
+- Target output: 400-600 words per summarized article (genuinely detailed)
 """
 from __future__ import annotations
 
@@ -28,9 +29,9 @@ from config import cfg
 from utils import logger
 
 
-_BATCH_PROMPT_TEMPLATE = """You are an expert AI industry analyst writing a daily intelligence briefing for a technical reader who needs deep, structured detail on AI model launches and infrastructure upgrades.
+_BATCH_PROMPT_TEMPLATE = """You are an elite AI industry analyst writing a daily intelligence briefing for a technical reader who needs DEEP, STRUCTURED detail on AI model launches, infrastructure upgrades, research breakthroughs, and industry moves. The reader is technically sophisticated (an ML engineer or technical founder) and wants substance, not headlines.
 
-Below are {n} news articles from The Deep View (a daily AI publication). For EACH article, classify it and produce a structured summary.
+Below are {n} news articles from various AI news sources. For EACH article, classify it and produce a DETAILED structured summary (400-600 words per article when SUMMARIZE is chosen).
 
 CLASSIFICATION CATEGORIES (pick the best fit):
 - model_launch       : A new AI model is being released (e.g., GPT-5.6, Claude Sonnet 5, Gemini 3.5)
@@ -51,14 +52,14 @@ STATUS: <SUMMARIZE | SKIP>
 === END ARTICLE {idx} ===
 
 RULES FOR STATUS:
-- SKIP if the article is pure opinion, culture, lifestyle, or has no technical/business substance
+- SKIP if the article is pure opinion, culture, lifestyle, newsletter meta-commentary, or has no technical/business substance
 - SUMMARIZE for everything else
 
 RULES FOR structured_content (depends on category):
 
 If CATEGORY = model_launch AND STATUS = SUMMARIZE, output these sections:
 ### TL;DR
-One sentence capturing the most important takeaway.
+Two to three sentences capturing the most important takeaway, the model name, and the headline capability.
 
 ### Model Details
 - Model name: <full name with variant (e.g., GPT-5.6 Sol)>
@@ -66,37 +67,113 @@ One sentence capturing the most important takeaway.
 - Variants: <list variants if any, with positioning (flagship/balanced/fast)>
 - Context window: <token count if mentioned, else "not disclosed">
 - Modalities: <text/vision/audio/video/code>
+- Architecture: <any disclosed architectural details — MoE, dense, parameter count, training data scale>
 
 ### Benchmarks
 - <Benchmark name>: <score> (vs <competitor>: <score> if mentioned)
-- One bullet per benchmark mentioned in the article
+- One bullet per benchmark mentioned in the article. Include all comparisons.
 
 ### Key Abilities
-- 3-5 bullet points describing what the model can do that's new or improved
+- 4-6 bullet points describing what the model can do that is new or improved. Be specific — name the capability, not the marketing term.
+
+### Technical Details
+- 3-5 bullet points on training data, compute, RLHF/RLAIF methods, alignment techniques, or any disclosed technical approach. If the article does not disclose this, say "Not disclosed in source."
 
 ### Pricing & Availability
 - Pricing: <per 1M tokens or subscription, if mentioned>
 - Availability: <API, chatbot, enterprise, waitlist, etc.>
 - Licensing: <open/closed, if mentioned>
+- Rate limits: <if mentioned>
 
 ### Why It Matters
-2-3 sentences on industry impact, who is affected, what changes.
+3-4 sentences on industry impact: who is affected, what competitive dynamics shift, what this enables that was not possible before, and what to watch for next.
 
-If CATEGORY in (infra_upgrade, core_logic, functional_update) AND STATUS = SUMMARIZE:
+If CATEGORY = infra_upgrade AND STATUS = SUMMARIZE:
 ### TL;DR
-One sentence.
+Two to three sentences.
 ### What Changed
-3-5 bullet points, concrete and technical.
+4-6 bullet points, concrete and technical (capacity numbers, locations, hardware specs, power draw).
+### Technical Specs
+- Hardware: <chips, servers, networking gear>
+- Scale: <number of GPUs, MW of power, square footage>
+- Location: <data center locations>
+- Timeline: <when operational, expansion plans>
 ### Impact
-2-3 sentences on affected products, users, industry direction.
+3-4 sentences on affected products, users, industry direction, and competitive positioning.
 
-If CATEGORY in (research, policy, business, other) AND STATUS = SUMMARIZE:
+If CATEGORY = core_logic AND STATUS = SUMMARIZE:
 ### TL;DR
-One sentence.
-### Key Points
-3-5 bullet points.
+Two to three sentences.
+### The Innovation
+4-6 bullet points describing the technical change. Be precise — name the technique, the loss function, the architecture modification.
+### How It Works
+2-3 paragraphs (3-5 sentences each) explaining the mechanism in technical detail. Use proper ML terminology.
+### Evidence
+- <Benchmark or result>: <score>
+- <Comparison>: <numbers>
 ### Why It Matters
-2-3 sentences.
+3-4 sentences on what this unlocks, who can use it, and what comes next.
+
+If CATEGORY = functional_update AND STATUS = SUMMARIZE:
+### TL;DR
+Two to three sentences.
+### What's New
+4-6 bullet points listing the new features, integrations, or capabilities. Be specific.
+### How It Works
+2-3 paragraphs (3-5 sentences each) explaining the feature technically.
+### Availability
+- Who gets it: <free/paid/enterprise/waitlist>
+- Rollout: <gradual/immediate/region-specific>
+### Impact
+3-4 sentences on user workflows affected, competitive positioning, and what to watch for.
+
+If CATEGORY = research AND STATUS = SUMMARIZE:
+### TL;DR
+Two to three sentences.
+### The Breakthrough
+4-6 bullet points on the core technical contribution. Be precise.
+### Method
+2-3 paragraphs (3-5 sentences each) on the experimental setup, datasets, baselines, and evaluation. Use proper academic terminology.
+### Results
+- <Benchmark>: <score> vs <baseline>: <score>
+- One bullet per key result.
+### Why It Matters
+3-4 sentences on implications for the field, what it enables, and limitations acknowledged by the authors.
+
+If CATEGORY = policy AND STATUS = SUMMARIZE:
+### TL;DR
+Two to three sentences.
+### What Happened
+4-6 bullet points on the regulatory action, governance move, or government policy. Cite specific agencies, laws, or frameworks.
+### Stakeholder Positions
+- <Agency/Government>: <position>
+- <Company>: <position>
+- <Civil society>: <position>
+### Impact
+3-4 sentences on affected companies, compliance burden, and what comes next.
+
+If CATEGORY = business AND STATUS = SUMMARIZE:
+### TL;DR
+Two to three sentences.
+### The Deal
+- Companies: <list>
+- Structure: <funding / acquisition / partnership / IPO>
+- Amount: <valuation / deal size>
+- Lead investors: <if applicable>
+### Strategic Logic
+2-3 paragraphs (3-5 sentences each) on why this deal makes sense, what each side gains, and how it reshapes the competitive map.
+### Impact
+3-4 sentences on what to watch for next — integration risks, regulatory approval odds, follow-on moves.
+
+If CATEGORY = other AND STATUS = SUMMARIZE:
+### TL;DR
+Two to three sentences.
+### Key Points
+4-6 bullet points covering the substantive content of the article.
+### Context
+2-3 paragraphs (3-5 sentences each) providing background and why this matters now.
+### Why It Matters
+3-4 sentences.
 
 If STATUS = SKIP:
 <no other content — just the STATUS line>
@@ -109,8 +186,10 @@ ARTICLES TO SUMMARIZE:
 
 
 def _format_article_block(idx: int, article: dict) -> str:
+    source = article.get("source") or "unknown source"
     return (
         f"=== ARTICLE {idx} ===\n"
+        f"SOURCE: {source}\n"
         f"TITLE: {article['title']}\n"
         f"AUTHOR: {article['author'] or 'Unknown'}\n"
         f"PUBLISHED: {article['published_at'] or 'unknown'}\n"

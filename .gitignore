@@ -7,3 +7,8 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+# Local test artifacts
+data/
+_smoke_data/
+*.sqlite3
+*.db

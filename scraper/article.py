@@ -22,6 +22,7 @@ class Article:
     image_content_type: str | None
     body_text: str
     raw_html: str
+    source: str = ""
 
 
 _JSONLD_RE = re.compile(
@@ -92,7 +93,7 @@ def _download_image(image_url: str) -> tuple[bytes | None, str | None]:
         return None, None
 
 
-def fetch_article(url: str, fetch_image: bool = True) -> Article | None:
+def fetch_article(url: str, fetch_image: bool = True, source: str = "") -> Article | None:
     """Fetch one article, extract metadata, return structured Article or None on failure."""
     try:
         with http_client() as client:
@@ -145,7 +146,7 @@ def fetch_article(url: str, fetch_image: bool = True) -> Article | None:
     # Trim boilerplate at the start (nav, sign-in buttons, etc.)
     if title and title in body_text:
         body_text = body_text[body_text.index(title):]
-    # Cap input to ~12K chars to keep prompt size reasonable when batching 10 articles
+    # Cap input to ~12K chars to keep prompt size reasonable when batching 15 articles
     body_text = body_text[:12000]
 
     image_bytes, image_content_type = (None, None)
@@ -164,4 +165,5 @@ def fetch_article(url: str, fetch_image: bool = True) -> Article | None:
         image_content_type=image_content_type,
         body_text=body_text,
         raw_html=html,
+        source=source,
     )

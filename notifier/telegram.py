@@ -92,12 +92,15 @@ def _build_caption(article: dict, category: str | None) -> str:
     published = article.get("published_at", "")
     date_str = published[:10] if published else "unknown date"
     url = article.get("url", "")
+    source = article.get("source") or ""
     emoji = _CATEGORY_EMOJI.get(category or "", "📰")
     cat_label = (category or "article").replace("_", " ").title()
 
+    source_line = f"📡 Source: {source}\n" if source else ""
     return (
         f"{emoji} *{title}*\n\n"
         f"_{author} · {date_str}_\n"
+        f"{source_line}"
         f"📂 Category: {cat_label}\n"
         f"🔗 [Read original]({url})"
     )
