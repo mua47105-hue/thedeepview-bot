@@ -23,6 +23,9 @@ ENV PORT=7860
 # Expose the port HF expects (7860 for Spaces)
 EXPOSE 7860
 
-# Use tini as init, then run scheduler (which starts uvicorn + APScheduler)
+# Use tini as init, then run scheduler (which starts uvicorn + APScheduler + state restore).
+# NOTE: do NOT use 'python -m scheduler.py' — the -m flag expects a module name (no .py).
+#       Also avoid 'python -m scheduler' — that risks importing Python's stdlib 'scheduler' module.
+#       Running the file directly is the safest pattern.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python", "-m", "scheduler.py"]
+CMD ["python", "scheduler.py"]
