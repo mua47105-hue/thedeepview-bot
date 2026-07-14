@@ -260,6 +260,7 @@ async def debug():
             # local_address="0.0.0.0" caused SSL EOF errors with Cloudflare Workers.
             with httpx.Client(
                 timeout=httpx.Timeout(connect=10, read=20, write=10, pool=10),
+                limits=httpx.Limits(max_keepalive_connections=0, max_connections=5, keepalive_expiry=0.0),
             ) as client:
                 resp = client.get(f"{base}/bot{cfg.telegram_bot_token}/getMe")
             data = resp.json()

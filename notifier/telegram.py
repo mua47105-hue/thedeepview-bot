@@ -23,19 +23,23 @@ from utils import logger
 
 
 # ── HTTP client configuration ────────────────────────────────────────────────
-# Standard httpx transport — NO custom local_address="0.0.0.0" because it
-# caused SSL EOF errors with Cloudflare Workers. The default transport works
-# fine for all other HTTPS sites from HF Spaces (thedeepview.com, openai.com,
-# etc.), so it works for the proxy too.
+# CRITICAL: Cloudflare Workers close connections after each response, but
+# httpx's connection pool tries to reuse them → SSL EOF errors on the 2nd
+# request. Fix: disable keepalive entirely (max_keepalive_connections=0)
+# so every request gets a fresh connection.
 _HTTP_TIMEOUT = httpx.Timeout(
     connect=15.0,   # 15s for TCP+TLS handshake to proxy
     read=30.0,      # 30s for Telegram API response
     write=15.0,
     pool=15.0,
 )
+_HTTP_LIMITS = httpx.Limits(
+    max_keepalive_connections=0,   # DON'T keep connections alive (Cloudflare kills them)
+    max_connections=10,
+    keepalive_expiry=0.0,          # immediately discard pooled connections
+)
 
-# Persistent client for connection reuse — more efficient than creating a new
-# client per request, and keeps the TCP connection warm.
+# Persistent client (but with no keepalive, so each request is a fresh connection)
 _client: httpx.Client | None = None
 
 
@@ -45,6 +49,7 @@ def _get_client() -> httpx.Client:
     if _client is None or _client.is_closed:
         _client = httpx.Client(
             timeout=_HTTP_TIMEOUT,
+            limits=_HTTP_LIMITS,
             headers={"User-Agent": "TheDeepViewBot/2.0"},
         )
     return _client

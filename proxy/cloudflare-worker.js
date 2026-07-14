@@ -5,9 +5,7 @@
  *   Hugging Face Spaces BLOCKS api.telegram.org at the TLS/SNI level
  *   (intentional policy to prevent bot abuse on free tier). This worker
  *   acts as a transparent reverse proxy, forwarding all requests to
- *   api.telegram.org. Deploy this on Cloudflare Workers (free tier:
- *   100,000 requests/day — more than enough for a bot that sends ~15
- *   messages every 2 hours = ~180 messages/day).
+ *   api.telegram.org.
  *
  * DEPLOY (5 minutes):
  *   1. Go to https://dash.cloudflare.com → Workers & Pages → Create
@@ -19,32 +17,14 @@
  *        TELEGRAM_API_BASE = https://tg-proxy.your-name.workers.dev
  *   7. Restart the Space (or wait for next pipeline run)
  *
- * ALTERNATIVE: deploy via Wrangler CLI
- *   npx wrangler deploy proxy/cloudflare-worker.js --name tg-proxy
- *
- * SECURITY:
- *   This proxy is open (no auth). For a private proxy, add a secret header
- *   check (uncomment the AUTH_TOKEN section below and set a secret in
- *   Cloudflare dashboard → Settings → Variables). For most personal bots,
- *   the open proxy is fine — your bot token is in the URL path, which
- *   isn't logged by Cloudflare.
- *
  * COST: $0 (Cloudflare Workers free tier = 100k requests/day)
  */
 
 export default {
   async fetch(request, env) {
-    // ── Optional: require auth token (uncomment to enable) ───────────────
-    // if (env.AUTH_TOKEN) {
-    //   const auth = request.headers.get("X-Proxy-Auth");
-    //   if (auth !== env.AUTH_TOKEN) {
-    //     return new Response("Unauthorized", { status: 401 });
-    //   }
-    // }
-
     const url = new URL(request.url);
 
-    // Health check endpoint — useful for uptime monitors
+    // Health check endpoint
     if (url.pathname === "/" || url.pathname === "/health") {
       return new Response(JSON.stringify({
         status: "ok",
@@ -60,25 +40,21 @@ export default {
     url.host = "api.telegram.org";
     url.protocol = "https:";
 
-    // Clone the request with the new URL
-    const proxyRequest = new Request(url, request);
-
-    // Forward the request to Telegram
+    // CRITICAL: pass the original request object directly to fetch(url, request).
+    // Do NOT use new Request(url, request) — it can drop POST bodies on some
+    // Cloudflare Workers runtime versions, causing sendMessage to fail.
+    // Passing the original request preserves method, headers, and body correctly.
     try {
-      const response = await fetch(proxyRequest);
+      const response = await fetch(url, request);
 
-      // Add CORS headers so browser-based tools can also use this proxy
+      // Add CORS headers
       const newHeaders = new Headers(response.headers);
       newHeaders.set("Access-Control-Allow-Origin", "*");
       newHeaders.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
       newHeaders.set("Access-Control-Allow-Headers", "*");
 
-      // Handle preflight requests
       if (request.method === "OPTIONS") {
-        return new Response(null, {
-          status: 204,
-          headers: newHeaders,
-        });
+        return new Response(null, { status: 204, headers: newHeaders });
       }
 
       return new Response(response.body, {

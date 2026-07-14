@@ -33,8 +33,13 @@ _HTTP_TIMEOUT = httpx.Timeout(
     write=10.0,
     pool=10.0,
 )
-# NO custom transport — local_address="0.0.0.0" caused SSL EOF errors with
-# Cloudflare Workers. Default transport works fine.
+# CRITICAL: disable keepalive — Cloudflare Workers close connections after
+# each response, but httpx tries to reuse them → SSL EOF on 2nd request.
+_HTTP_LIMITS = httpx.Limits(
+    max_keepalive_connections=0,
+    max_connections=10,
+    keepalive_expiry=0.0,
+)
 
 HELP_TEXT = (
     "🤖 *TheDeepView Bot — Commands*\n\n"
@@ -52,12 +57,12 @@ def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
     url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     try:
-        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+        with httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS) as client:
             resp = client.post(url, json=payload)
         if resp.status_code == 400:
             # Markdown parse failure — retry as plain text
             payload.pop("parse_mode", None)
-            with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+            with httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS) as client:
                 client.post(url, json=payload)
     except Exception as e:
         logger.warning(f"command reply failed: {e}")
@@ -160,7 +165,8 @@ def _long_poll_loop() -> None:
     )
 
     # Persistent client for connection reuse — keeps TCP connection warm
-    client = httpx.Client(timeout=_HTTP_TIMEOUT)
+    # (but with no keepalive, so each request gets a fresh connection)
+    client = httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS)
 
     while True:
         try:
@@ -202,7 +208,7 @@ def _long_poll_loop() -> None:
                 client.close()
             except Exception:
                 pass
-            client = httpx.Client(timeout=_HTTP_TIMEOUT)
+            client = httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS)
             _backoff_sleep(consecutive_errors)
 
         except Exception as e:
