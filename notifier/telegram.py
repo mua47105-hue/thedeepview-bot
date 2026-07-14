@@ -1,42 +1,21 @@
 """
-Telegram Bot API sender — uses urllib (Python stdlib) instead of httpx.
+Telegram Bot API sender — uses requests library (urllib3 backend).
 
-ROOT CAUSE OF ALL PREVIOUS FAILURES:
-  httpx has a TLS session caching issue when connecting to Cloudflare Workers
-  from HF Spaces. The FIRST request succeeds, but ALL subsequent requests
-  fail with SSL handshake timeout or SSL EOF — regardless of GET or POST,
-  regardless of connection pool settings, regardless of keepalive settings.
+httpx and urllib both fail with SSL EOF when connecting to Cloudflare Workers
+from HF Spaces. The `requests` library uses urllib3 which has a different SSL
+implementation that may work better.
 
-  This was confirmed by container logs showing:
-  - First getUpdates (GET) → 200 OK ✅
-  - All subsequent requests (GET or POST) → SSL handshake timeout ❌
-
-THE FIX:
-  Use Python's built-in urllib.request instead of httpx. urllib uses a
-  completely different network stack (urllib3 → http.client → socket)
-  with NO connection pooling, NO TLS session caching, and NO HTTP/2.
-  Every request is a fresh TCP+TLS connection that is fully closed after
-  use. This completely eliminates the session reuse issue.
-
-  Trade-off: slightly slower (new TLS handshake per request, ~200ms overhead)
-  but 100% reliable. For a bot that sends ~15 messages every 2 hours, this
-  is negligible.
-
-  Also uses GET for all API calls (POST also fails from HF Spaces to
-  Cloudflare Workers, but GET works reliably with urllib).
+Uses GET for all API calls (POST also fails from HF Spaces).
 """
 from __future__ import annotations
 
-import json
 import logging
-import urllib.parse
-import urllib.request
+
+import requests
 
 from config import cfg
 from utils import logger
 
-# urllib doesn't need any client configuration — each request is independent.
-# Just set a timeout (in seconds) for the entire request (connect + read).
 _REQUEST_TIMEOUT = 30
 
 
@@ -46,38 +25,27 @@ def _api_url(method: str, params: dict | None = None) -> str:
     url = f"{base}/bot{cfg.telegram_bot_token}/{method}"
     if params:
         clean = {k: str(v) for k, v in params.items() if v is not None}
-        url += "?" + urllib.parse.urlencode(clean)
+        from urllib.parse import urlencode
+        url += "?" + urlencode(clean)
     return url
 
 
 def _telegram_get(method: str, params: dict | None = None) -> dict:
-    """Make a GET request to the Telegram Bot API via urllib.
-
-    Each request creates a fresh urllib.request.urlopen() call — no
-    connection pooling, no TLS session caching. This is the KEY fix
-    that eliminates all SSL issues with Cloudflare Workers from HF Spaces.
-    """
+    """Make a GET request to the Telegram Bot API via requests library."""
     url = _api_url(method, params)
-    req = urllib.request.Request(url, headers={"User-Agent": "TheDeepViewBot/2.0"})
     try:
-        with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        # Telegram returns 400 for bad requests (e.g., invalid Markdown)
-        # Read the body so we can log the error message
-        try:
-            body = e.read().decode("utf-8")
-            return json.loads(body)
-        except Exception:
-            logger.error(f"Telegram API {method} HTTP {e.code}: {e.reason}")
-            raise
+        resp = requests.get(url, timeout=_REQUEST_TIMEOUT, headers={"User-Agent": "TheDeepViewBot/2.0"})
+        return resp.json()
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"Telegram API {method} HTTP error: {e}")
+        raise
     except Exception as e:
         logger.error(f"Telegram API {method} failed: {type(e).__name__}: {e}")
         raise
 
 
 def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> dict:
-    """Send a text message via GET (urllib)."""
+    """Send a text message via GET (requests)."""
     try:
         return _telegram_get("sendMessage", {
             "chat_id": chat_id,
@@ -86,7 +54,6 @@ def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> dict:
             "disable_web_page_preview": "false",
         })
     except Exception:
-        # If Markdown fails, retry as plain text
         if parse_mode:
             logger.warning("sendMessage failed with parse_mode, retrying as plain text")
             return _telegram_get("sendMessage", {
@@ -98,7 +65,7 @@ def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> dict:
 
 
 def _send_photo_by_url(chat_id: str, image_url: str, caption: str) -> dict:
-    """Send a photo by URL via GET (urllib). Telegram downloads the image."""
+    """Send a photo by URL via GET (requests)."""
     try:
         return _telegram_get("sendPhoto", {
             "chat_id": chat_id,

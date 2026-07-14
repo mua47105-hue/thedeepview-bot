@@ -265,13 +265,11 @@ async def debug():
     }
     if cfg.telegram_bot_token:
         try:
-            import urllib.request
-            import json as _json
+            import requests
             base = cfg.telegram_api_base.rstrip("/")
             url = f"{base}/bot{cfg.telegram_bot_token}/getMe"
-            req = urllib.request.Request(url, headers={"User-Agent": "TheDeepViewBot/2.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = _json.loads(resp.read().decode("utf-8"))
+            resp = requests.get(url, timeout=15, headers={"User-Agent": "TheDeepViewBot/2.0"})
+            data = resp.json()
             if data.get("ok"):
                 telegram_status["bot_info"] = {
                     "username": data["result"]["username"],
