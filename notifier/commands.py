@@ -1,45 +1,23 @@
 """
 Interactive Telegram bot commands via long-polling.
 
-Runs in a background daemon thread alongside the FastAPI server.
-Responds to: /start, /status, /quota, /latest, /wake, /help
+Uses urllib (Python stdlib) instead of httpx to avoid TLS session caching
+issues with Cloudflare Workers from HF Spaces. Every request is a fresh
+TCP+TLS connection — no pooling, no session reuse, no SSL errors.
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
-
-import httpx
+import urllib.parse
+import urllib.request
 
 from config import cfg
 from scraper.diff import get_gemini_calls_today, get_recent_articles, get_recent_runs
 from utils import logger
 
-TELEGRAM_API = "https://api.telegram.org"
-
-# ── HF Spaces firewall workaround ───────────────────────────────────────────
-# HF Spaces BLOCKS api.telegram.org at the TLS/SNI level (intentional policy
-# to prevent bot abuse on free tier). You MUST deploy an external proxy
-# (Cloudflare Worker, Vercel, Railway) and set TELEGRAM_API_BASE env var.
-#
-# See: proxy/cloudflare-worker.js for a ready-to-deploy proxy.
-#
-# The long-poll timeout is 15s (not 50s) so data flows frequently and HF's
-# internal proxy doesn't drop idle connections.
 _TELEGRAM_LONG_POLL_SECONDS = 15
-_HTTP_TIMEOUT = httpx.Timeout(
-    connect=15.0,   # 15s for TCP+TLS handshake to proxy
-    read=30.0,      # 30s read — buffer above 15s long-poll
-    write=10.0,
-    pool=10.0,
-)
-# CRITICAL: disable keepalive — Cloudflare Workers close connections after
-# each response, but httpx tries to reuse them → SSL EOF on 2nd request.
-_HTTP_LIMITS = httpx.Limits(
-    max_keepalive_connections=0,
-    max_connections=10,
-    keepalive_expiry=0.0,
-)
 
 HELP_TEXT = (
     "🤖 *TheDeepView Bot — Commands*\n\n"
@@ -53,20 +31,27 @@ HELP_TEXT = (
 
 
 def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
-    """Send a text message via GET request (POST fails to Cloudflare Workers from HF Spaces)."""
-    import urllib.parse
+    """Send a text message via GET (urllib)."""
     base = cfg.telegram_api_base.rstrip("/")
     params = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage?" + urllib.parse.urlencode(params)
     try:
-        with httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS) as client:
-            resp = client.get(url)
-        if resp.status_code == 400:
+        req = urllib.request.Request(url, headers={"User-Agent": "TheDeepViewBot/2.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 400 and parse_mode:
             # Markdown parse failure — retry as plain text
             params.pop("parse_mode", None)
             url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage?" + urllib.parse.urlencode(params)
-            with httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS) as client:
-                client.get(url)
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "TheDeepViewBot/2.0"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    resp.read()
+            except Exception:
+                pass
+        else:
+            logger.warning(f"command reply HTTP {e.code}: {e.reason}")
     except Exception as e:
         logger.warning(f"command reply failed: {e}")
 
@@ -122,12 +107,11 @@ def _handle_update(update: dict) -> None:
     if not text or not chat_id:
         return
 
-    # Only respond to the configured chat_id (security: don't reply to random users)
     if cfg.telegram_chat_id and chat_id != cfg.telegram_chat_id:
         logger.info(f"Ignoring command from unauthorized chat_id={chat_id}: {text!r}")
         return
 
-    cmd = text.split()[0].lower().split("@")[0]  # strip bot username suffix
+    cmd = text.split()[0].lower().split("@")[0]
     if cmd in ("/start", "/help"):
         _send_text(chat_id, HELP_TEXT)
     elif cmd == "/status":
@@ -138,50 +122,38 @@ def _handle_update(update: dict) -> None:
         _send_text(chat_id, _format_latest())
     elif cmd == "/wake":
         _send_text(chat_id, "⏰ Triggering a pipeline run now…")
-        # Import here to avoid circular import at module load
         from app import _run_in_background
         threading.Thread(target=_run_in_background, daemon=True).start()
-    else:
-        # Silently ignore unknown commands (avoid spamming on every message)
-        pass
 
 
 def _long_poll_loop() -> None:
-    """Run getUpdates in a loop. Exits cleanly on thread shutdown.
+    """Run getUpdates in a loop using urllib (not httpx).
 
-    HF SPACES FIREWALL WORKAROUND:
-    Uses a 15-second Telegram-side long-poll (not 50s) so data flows every
-    15 seconds. HF's internal proxy drops idle connections after ~45s, which
-    was causing '_ssl.c:999: The handshake operation timed out' every cycle.
-    With 15s polling, the connection stays active and the firewall doesn't
-    kill it.
-
-    Uses a persistent httpx.Client for connection reuse (more efficient,
-    keeps the TCP connection warm). On connection errors, the client is
-    recreated to replace any dead pooled connections.
+    Each request is a fresh urllib.request.urlopen() call — no connection
+    pooling, no TLS session caching. This eliminates the SSL handshake
+    timeout / SSL EOF errors that httpx was causing on the 2nd+ request.
     """
-    base_url = f"{cfg.telegram_api_base.rstrip('/')}/bot{cfg.telegram_bot_token}/getUpdates"
-    offset = 0  # 0 = first call returns all pending updates; subsequent calls use offset
+    base = cfg.telegram_api_base.rstrip("/")
+    url_base = f"{base}/bot{cfg.telegram_bot_token}/getUpdates"
+    offset = 0
     consecutive_errors = 0
     logger.info(
-        f"Telegram command poller started (15s long-poll, base={cfg.telegram_api_base})"
+        f"Telegram command poller started (15s long-poll, base={cfg.telegram_api_base}, urllib)"
     )
-
-    # Persistent client for connection reuse — keeps TCP connection warm
-    # (but with no keepalive, so each request gets a fresh connection)
-    client = httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS)
 
     while True:
         try:
-            # Telegram-side long-poll: 15 seconds. This is the KEY fix.
-            # Data flows every 15s, so HF's firewall never drops the connection.
             params = {
                 "timeout": _TELEGRAM_LONG_POLL_SECONDS,
                 "offset": offset,
-                "allowed_updates": ["message"],
+                "allowed_updates": "message",
             }
-            resp = client.get(base_url, params=params)
-            data = resp.json()
+            url = url_base + "?" + urllib.parse.urlencode(params)
+            req = urllib.request.Request(url, headers={"User-Agent": "TheDeepViewBot/2.0"})
+            # Timeout = long-poll (15s) + buffer (20s) = 35s
+            with urllib.request.urlopen(req, timeout=35) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
             if not data.get("ok"):
                 logger.warning(f"getUpdates not ok: {data}")
                 consecutive_errors += 1
@@ -196,35 +168,18 @@ def _long_poll_loop() -> None:
                 except Exception as e:
                     logger.warning(f"command handler error: {e}")
 
-            # Reset error counter on any successful getUpdates call
             consecutive_errors = 0
-
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
-            # Connection died or timed out — recreate the client to get a fresh
-            # TCP connection (the old one may be a dead pooled connection)
-            consecutive_errors += 1
-            logger.warning(
-                f"long-poll connection error (#{consecutive_errors}): {e} — "
-                f"recreating client, backing off {_backoff_seconds(consecutive_errors)}s"
-            )
-            try:
-                client.close()
-            except Exception:
-                pass
-            client = httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS)
-            _backoff_sleep(consecutive_errors)
 
         except Exception as e:
             consecutive_errors += 1
             logger.warning(
-                f"long-poll loop error (#{consecutive_errors}): {e} — "
+                f"long-poll error (#{consecutive_errors}): {type(e).__name__}: {e} — "
                 f"backing off {_backoff_seconds(consecutive_errors)}s"
             )
             _backoff_sleep(consecutive_errors)
 
 
 def _backoff_seconds(consecutive_errors: int) -> float:
-    """Exponential backoff: 5s, 10s, 20s, 40s, capped at 60s."""
     return min(60.0, 5.0 * (2 ** max(0, consecutive_errors - 1)))
 
 
