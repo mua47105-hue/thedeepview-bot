@@ -36,9 +36,19 @@ def _run_in_background():
 
 @app.on_event("startup")
 def _on_startup() -> None:
-    # Start the interactive Telegram command poller in a background thread.
-    # Safe to call: it's idempotent and no-ops if TELEGRAM_BOT_TOKEN is missing.
-    start_command_poller()
+    # Command poller DISABLED — HF Spaces only allows ONE concurrent TLS
+    # connection to the same external host. The long-poll loop holds a
+    # connection for 15s, which blocks ALL other proxy connections (sendMessage,
+    # sendPhoto, etc.) causing SSL EOF errors.
+    #
+    # The bot's primary function is SENDING summaries (not receiving commands),
+    # so disabling the poller is acceptable. Commands (/status, /quota, etc.)
+    # can still be triggered via the web API: /wake, /status, /quota endpoints.
+    #
+    # To re-enable: uncomment the line below. But be aware that sendMessage
+    # will fail with SSL EOF while the long-poll is active.
+    # start_command_poller()
+    logger.info("Telegram command poller disabled (HF Spaces concurrent connection limit)")
 
 
 @app.get("/health")
