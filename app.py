@@ -231,13 +231,17 @@ async def debug():
             import google.generativeai as genai
             genai.configure(api_key=cfg.gemini_api_key)
             models = list(genai.list_models())
-            gemini_status["models"] = [
+            all_models = [
                 m.name.replace("models/", "")
                 for m in models
                 if "generateContent" in (getattr(m, "supported_generation_methods", []) or [])
-            ][:20]
+            ]
+            # Check primary availability against the FULL list, not the truncated one
             gemini_status["primary_model"] = cfg.gemini_primary_model
-            gemini_status["primary_available"] = cfg.gemini_primary_model in gemini_status["models"]
+            gemini_status["primary_available"] = cfg.gemini_primary_model in all_models
+            gemini_status["total_models"] = len(all_models)
+            # Return all models (not truncated) so the user can see what's available
+            gemini_status["models"] = all_models
         except Exception as e:
             gemini_status["error"] = str(e)[:300]
 
@@ -252,11 +256,10 @@ async def debug():
     if cfg.telegram_bot_token:
         try:
             base = cfg.telegram_api_base.rstrip("/")
-            # NOTE: httpx.get() does NOT accept transport= arg.
-            # Must use httpx.Client() with transport, then call .get() on it.
+            # Use httpx.Client with reasonable timeout. No custom transport —
+            # local_address="0.0.0.0" caused SSL EOF errors with Cloudflare Workers.
             with httpx.Client(
-                timeout=httpx.Timeout(connect=15, read=30, write=10, pool=10),
-                transport=httpx.HTTPTransport(local_address="0.0.0.0"),
+                timeout=httpx.Timeout(connect=10, read=20, write=10, pool=10),
             ) as client:
                 resp = client.get(f"{base}/bot{cfg.telegram_bot_token}/getMe")
             data = resp.json()
@@ -271,10 +274,10 @@ async def debug():
         except Exception as e:
             err_msg = str(e)[:300]
             telegram_status["error"] = err_msg
-            if "handshake" in err_msg.lower() or "timeout" in err_msg.lower():
+            if "handshake" in err_msg.lower() or "timeout" in err_msg.lower() or "eof" in err_msg.lower():
                 telegram_status["hint"] = (
-                    "HF Spaces blocks api.telegram.org. Deploy the proxy in "
-                    "proxy/cloudflare-worker.js and set TELEGRAM_API_BASE env var."
+                    "SSL error reaching proxy. Verify TELEGRAM_API_BASE is set to your "
+                    "Cloudflare Worker URL and the worker is deployed correctly."
                 )
 
     return JSONResponse({
@@ -293,6 +296,7 @@ async def debug():
             "GEMINI_API_KEY": "set" if cfg.gemini_api_key else "MISSING",
             "TELEGRAM_BOT_TOKEN": "set" if cfg.telegram_bot_token else "MISSING",
             "TELEGRAM_CHAT_ID": "set" if cfg.telegram_chat_id else "MISSING",
+            "TELEGRAM_API_BASE": cfg.telegram_api_base,
             "HF_TOKEN": "set" if cfg.hf_token else "not set",
             "HF_STATE_REPO": cfg.hf_state_repo or "not set",
         },

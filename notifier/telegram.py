@@ -23,16 +23,16 @@ from utils import logger
 
 
 # ── HTTP client configuration ────────────────────────────────────────────────
-# Force IPv4 (local_address="0.0.0.0") as defense-in-depth against anyio
-# happy-eyeballs Docker bugs. This alone won't fix the HF Spaces Telegram block,
-# but it prevents a separate class of IPv6-related timeout issues.
+# Standard httpx transport — NO custom local_address="0.0.0.0" because it
+# caused SSL EOF errors with Cloudflare Workers. The default transport works
+# fine for all other HTTPS sites from HF Spaces (thedeepview.com, openai.com,
+# etc.), so it works for the proxy too.
 _HTTP_TIMEOUT = httpx.Timeout(
-    connect=30.0,   # generous connect for proxy SSL handshake
-    read=60.0,      # generous read for Telegram API response
-    write=30.0,
-    pool=30.0,
+    connect=15.0,   # 15s for TCP+TLS handshake to proxy
+    read=30.0,      # 30s for Telegram API response
+    write=15.0,
+    pool=15.0,
 )
-_HTTP_TRANSPORT = httpx.HTTPTransport(local_address="0.0.0.0", retries=2)
 
 # Persistent client for connection reuse — more efficient than creating a new
 # client per request, and keeps the TCP connection warm.
@@ -45,7 +45,6 @@ def _get_client() -> httpx.Client:
     if _client is None or _client.is_closed:
         _client = httpx.Client(
             timeout=_HTTP_TIMEOUT,
-            transport=_HTTP_TRANSPORT,
             headers={"User-Agent": "TheDeepViewBot/2.0"},
         )
     return _client
@@ -64,11 +63,11 @@ def _api_url(method: str) -> str:
 def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
     """Make an HTTP request with retry logic.
 
-    Retries up to 3 times with exponential backoff (2s, 5s, 10s) on
-    connection errors. This handles transient proxy issues gracefully.
+    Retries up to 3 times with short backoff (1s, 3s) on connection errors.
+    Total worst-case time: ~45s (15s timeout + 1s + 15s timeout + 3s + 15s timeout).
     """
     max_attempts = 3
-    backoff_seconds = [2, 5, 10]
+    backoff_seconds = [1, 3]
 
     for attempt in range(1, max_attempts + 1):
         try:
