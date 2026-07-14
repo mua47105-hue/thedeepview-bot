@@ -17,13 +17,21 @@ from utils import logger
 
 TELEGRAM_API = "https://api.telegram.org"
 
-# Telegram long-poll can legitimately take up to 50 seconds (we ask for 30s
-# timeout in the getUpdates request). HF Spaces → api.telegram.org can have
-# slow SSL handshakes, so we use a split timeout: short connect (10s) but
-# long read (90s) so the long-poll has time to return.
+# ── HF Spaces firewall workaround ───────────────────────────────────────────
+# HF Spaces' internal proxy drops idle TCP connections after ~45 seconds.
+# If we use a long-poll timeout of 50s, the connection sits idle for 50s
+# waiting for messages, gets killed by the firewall, and the next request
+# hits '_ssl.c:999: The handshake operation timed out'.
+#
+# FIX: use a 15-second long-poll so data flows every 15s — the firewall
+# never sees the connection as idle. httpx read timeout is 30s (buffer
+# above the 15s long-poll for network latency).
+#
+# Reference: https://github.com/encode/httpx/discussions (HF Spaces pattern)
+_TELEGRAM_LONG_POLL_SECONDS = 15
 _HTTP_TIMEOUT = httpx.Timeout(
     connect=15.0,   # SSL handshake + TCP connect
-    read=90.0,      # long-poll can take up to 50s; give buffer
+    read=30.0,      # buffer above 15s long-poll
     write=10.0,
     pool=10.0,
 )
@@ -132,23 +140,36 @@ def _handle_update(update: dict) -> None:
 def _long_poll_loop() -> None:
     """Run getUpdates in a loop. Exits cleanly on thread shutdown.
 
-    Uses a 50-second Telegram-side long-poll timeout, with split httpx
-    timeouts (15s connect / 90s read) to handle HF Space → Telegram SSL
-    handshake variability. On errors, backs off exponentially up to 60s
-    so we don't spam the logs.
+    HF SPACES FIREWALL WORKAROUND:
+    Uses a 15-second Telegram-side long-poll (not 50s) so data flows every
+    15 seconds. HF's internal proxy drops idle connections after ~45s, which
+    was causing '_ssl.c:999: The handshake operation timed out' every cycle.
+    With 15s polling, the connection stays active and the firewall doesn't
+    kill it.
+
+    Uses a persistent httpx.Client for connection reuse (more efficient,
+    keeps the TCP connection warm). On connection errors, the client is
+    recreated to replace any dead pooled connections.
     """
     base_url = f"{TELEGRAM_API}/bot{cfg.telegram_bot_token}/getUpdates"
     offset = 0  # 0 = first call returns all pending updates; subsequent calls use offset
     consecutive_errors = 0
-    logger.info("Telegram command poller started")
+    logger.info("Telegram command poller started (15s long-poll for HF Spaces firewall)")
+
+    # Persistent client for connection reuse — keeps TCP connection warm
+    # so HF's firewall doesn't see it as idle.
+    client = httpx.Client(timeout=_HTTP_TIMEOUT)
 
     while True:
         try:
-            # Telegram-side long-poll: 50 seconds. Combined with our 90s read
-            # timeout, this gives plenty of buffer for slow SSL handshakes.
-            params = {"timeout": 50, "offset": offset, "allowed_updates": ["message"]}
-            with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-                resp = client.get(base_url, params=params)
+            # Telegram-side long-poll: 15 seconds. This is the KEY fix.
+            # Data flows every 15s, so HF's firewall never drops the connection.
+            params = {
+                "timeout": _TELEGRAM_LONG_POLL_SECONDS,
+                "offset": offset,
+                "allowed_updates": ["message"],
+            }
+            resp = client.get(base_url, params=params)
             data = resp.json()
             if not data.get("ok"):
                 logger.warning(f"getUpdates not ok: {data}")
@@ -166,14 +187,22 @@ def _long_poll_loop() -> None:
 
             # Reset error counter on any successful getUpdates call
             consecutive_errors = 0
-        except httpx.TimeoutException as e:
-            # SSL handshake or read timeout — common on HF free tier, usually transient
+
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            # Connection died or timed out — recreate the client to get a fresh
+            # TCP connection (the old one may be a dead pooled connection)
             consecutive_errors += 1
             logger.warning(
-                f"long-poll timeout (#{consecutive_errors}): {e} — "
-                f"backing off {_backoff_seconds(consecutive_errors)}s"
+                f"long-poll connection error (#{consecutive_errors}): {e} — "
+                f"recreating client, backing off {_backoff_seconds(consecutive_errors)}s"
             )
+            try:
+                client.close()
+            except Exception:
+                pass
+            client = httpx.Client(timeout=_HTTP_TIMEOUT)
             _backoff_sleep(consecutive_errors)
+
         except Exception as e:
             consecutive_errors += 1
             logger.warning(
