@@ -1,26 +1,30 @@
 # Sync GitHub → Hugging Face Space
 #
 # On every push to `main` (or manual trigger), this workflow mirrors the
-# GitHub repo into a Hugging Face Space repo. The Space then rebuilds
-# automatically from the Dockerfile.
+# GitHub repo into the Hugging Face Space `tohidtsk4/Btcxauusd`. The Space
+# then rebuilds automatically from the Dockerfile.
 #
 # Setup (one-time):
 #   1. Create the HF Space: https://huggingface.co/new-space
+#      - Owner: tohidtsk4
+#      - Name:  Btcxauusd
 #      - SDK: Docker
 #      - Visibility: Private (recommended) or Public
-#      - Note the full repo id: <your-username>/<space-name>
 #   2. Create an HF access token: https://huggingface.co/settings/tokens
 #      - Type: Read + Write
 #   3. In your GITHUB repo → Settings → Secrets and variables → Actions
 #      → New repository secret, add:
 #        Name:  HF_TOKEN
 #        Value: <the token from step 2>
-#        Name:  HF_SPACE_REPO
-#        Value: <your-username>/<space-name>   (e.g. mua47105-hue/thedeepview-bot)
 #
 # After this workflow runs once, your Space will rebuild on every GitHub push.
 
 name: Sync to Hugging Face Space
+
+# Hardcoded target Space — change here if you ever need to repoint it.
+# ONLY the token stays a secret; the repo name is not sensitive.
+env:
+  HF_SPACE_REPO: tohidtsk4/Btcxauusd
 
 on:
   push:
@@ -47,17 +51,12 @@ jobs:
         with:
           fetch-depth: 0  # full history so we can do a clean mirror push
 
-      - name: Verify required secrets
+      - name: Verify HF_TOKEN secret is set
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
         run: |
           if [ -z "$HF_TOKEN" ]; then
-            echo "::error::Secret HF_TOKEN is not set. See .github/workflows/sync-to-hf-space.yml for setup instructions."
-            exit 1
-          fi
-          if [ -z "$HF_SPACE_REPO" ]; then
-            echo "::error::Secret HF_SPACE_REPO is not set (should be 'username/space-name'). See .github/workflows/sync-to-hf-space.yml for setup instructions."
+            echo "::error::Secret HF_TOKEN is not set. Go to your GitHub repo → Settings → Secrets and variables → Actions → New repository secret, then add HF_TOKEN (your Hugging Face Read+Write access token from https://huggingface.co/settings/tokens)."
             exit 1
           fi
           echo "Target HF Space repo: $HF_SPACE_REPO"
@@ -73,16 +72,12 @@ jobs:
           echo "https://user:${HF_TOKEN}@huggingface.co" > ~/.git-credentials
 
       - name: Add HF Space as a remote
-        env:
-          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
         run: |
           # HF Spaces are pushed to https://huggingface.co/spaces/<user>/<name>
           git remote add space "https://huggingface.co/spaces/${HF_SPACE_REPO}.git"
           git remote -v
 
       - name: Push main → HF Space main
-        env:
-          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
         run: |
           set -e
           # Force-push to make HF Space an exact mirror of GitHub main.

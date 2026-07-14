@@ -125,7 +125,7 @@ Pure opinion/culture/lifestyle pieces are marked `SKIP` and only the photo+capti
 ### Step 3: Create the Hugging Face Space
 
 1. Go to https://huggingface.co/new-space
-2. **Owner:** your account. **Name:** `thedeepview-bot` (or whatever).
+2. **Owner:** `tohidtsk4`. **Name:** `Btcxauusd`. (This matches the hardcoded target in `.github/workflows/sync-to-hf-space.yml`.)
 3. **SDK:** Docker. **Visibility:** Private (recommended).
 4. **Hardware:** CPU basic (free).
 5. Create.
@@ -134,22 +134,29 @@ Pure opinion/culture/lifestyle pieces are marked `SKIP` and only the photo+capti
 
 **Recommended: automated GitHub → HF sync (set up once, then just `git push` to GitHub).**
 
-This repo ships with a GitHub Actions workflow at `.github/workflows/sync-to-hf-space.yml` that mirrors `main` to your HF Space on every push. Setup:
+This repo ships with a GitHub Actions workflow at `.github/workflows/sync-to-hf-space.yml` that mirrors `main` to the HF Space **`tohidtsk4/Btcxauusd`** on every push. The target Space is hardcoded in the workflow — you only need to set one secret.
 
-1. Create the HF Space (step 3 above) and note the full repo id: `<your-username>/<space-name>`.
+Setup:
+
+1. Create the HF Space at https://huggingface.co/new-space:
+   - **Owner:** `tohidtsk4`
+   - **Name:** `Btcxauusd`
+   - **SDK:** Docker
+   - **Visibility:** Private (recommended) or Public
 2. Create an HF access token at https://huggingface.co/settings/tokens — type: **Read** + **Write**.
 3. In your **GitHub** repo → Settings → Secrets and variables → Actions → New repository secret:
    - `HF_TOKEN` = the HF token from step 2
-   - `HF_SPACE_REPO` = `<your-username>/<space-name>` (e.g. `mua47105-hue/thedeepview-bot`)
 4. Push to `main` — the workflow runs automatically and mirrors to HF. You can also trigger it manually from the Actions tab ("Run workflow" button).
 
 After the first sync, every `git push origin main` to GitHub will automatically update the HF Space and trigger a rebuild. The Space rebuilds from the Dockerfile (~2-4 minutes).
+
+> **To repoint to a different Space**: edit the `env.HF_SPACE_REPO:` line at the top of `.github/workflows/sync-to-hf-space.yml`.
 
 **Alternative: manual push** (skip the workflow, push directly):
 
 ```bash
 # One-time: add HF Space as a second remote
-git remote add space https://huggingface.co/spaces/<your-username>/<space-name>.git
+git remote add space https://huggingface.co/spaces/tohidtsk4/Btcxauusd.git
 
 # Push to HF (use a token when prompted — your HF password won't work)
 git push space main
