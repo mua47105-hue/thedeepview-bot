@@ -53,17 +53,20 @@ HELP_TEXT = (
 
 
 def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
+    """Send a text message via GET request (POST fails to Cloudflare Workers from HF Spaces)."""
+    import urllib.parse
     base = cfg.telegram_api_base.rstrip("/")
-    url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    params = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage?" + urllib.parse.urlencode(params)
     try:
         with httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS) as client:
-            resp = client.post(url, json=payload)
+            resp = client.get(url)
         if resp.status_code == 400:
             # Markdown parse failure — retry as plain text
-            payload.pop("parse_mode", None)
+            params.pop("parse_mode", None)
+            url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage?" + urllib.parse.urlencode(params)
             with httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS) as client:
-                client.post(url, json=payload)
+                client.get(url)
     except Exception as e:
         logger.warning(f"command reply failed: {e}")
 
