@@ -8,3 +8,4 @@ uvicorn[standard]==0.32.1
 python-dotenv==1.0.1
 tenacity==9.0.0
 feedparser==6.0.11
+huggingface_hub==0.26.2

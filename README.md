@@ -145,6 +145,8 @@ In the Space → **Settings** → **Repository secrets** → add:
 | `TELEGRAM_BOT_TOKEN` | Your bot token from step 1 |
 | `TELEGRAM_CHAT_ID` | Your chat ID from step 1 |
 | `GEMINI_API_KEY` | Your Gemini API key from step 2 |
+| `HF_TOKEN` | (recommended) HF access token with Read+Write — enables persistent state sync (see [Persistent storage](#persistent-storage-via-hf-hub-free-recommended-for-hf-spaces)) |
+| `HF_STATE_REPO` | (recommended) e.g. `your-username/thedeepview-bot-state` |
 
 ### Step 6: Keep the Space awake (free-tier limitation)
 
@@ -200,7 +202,9 @@ The bot only responds to the configured `TELEGRAM_CHAT_ID` for security.
 | `GEMINI_SAFETY_THRESHOLD` | `18` | Stop calling at this count |
 | `GEMINI_BATCH_MAX_ARTICLES` | `15` | Max articles per batched call |
 | `SOURCES_JSON` | (none) | Override default source list (JSON array) |
-| `DATA_DIR` | `/data` | State storage dir (HF persistent storage or `./data` fallback) |
+| `DATA_DIR` | `/data` | Local state storage dir (HF persistent storage or `./data` fallback) |
+| `HF_TOKEN` | (none) | HF access token — enables persistent state sync (see below) |
+| `HF_STATE_REPO` | (none) | HF dataset repo for state, e.g. `your-username/thedeepview-bot-state` |
 | `PORT` | `7860` | HTTP port (HF Spaces requires 7860) |
 
 See [`.env.example`](.env.example) for a copy-paste template.
@@ -212,11 +216,35 @@ See [`.env.example`](.env.example) for a copy-paste template.
 | Limitation | Mitigation |
 |---|---|
 | HF free Spaces sleep after 48h of inactivity | External cron pings `/health` every 5 min (cron-job.org) |
-| HF free Spaces have **no persistent storage** — `/data` is ephemeral | Code falls back to `./data`; on Space restart the seen-URL store resets and some articles may be re-sent. To get true persistence, upgrade to HF Pro (paid) for persistent storage, or wire `DATA_DIR` to an external service. |
+| HF free Spaces have **no persistent storage** — `/data` is wiped on restart | Enable HF Hub state sync (free, see section below) — uploads `state.db` + `seen.json` to a private HF dataset repo after every run, restores on startup |
 | Gemini free tier = 20 RPD | One batched call per run, throttled at 18/20, so worst case 12 calls/day leaves 8 of buffer |
 | Telegram `sendPhoto` 10 MB limit | Code caps downloaded images at 5 MB |
 | Telegram `sendMessage` 4096 char limit | Code chunks longer summaries into multiple messages |
 | Scraping may hit rate limits | 1-second polite sleep between article fetches |
+
+---
+
+## Persistent storage via HF Hub (free, recommended for HF Spaces)
+
+Without persistent storage, every Space restart wipes your `seen.json` and `state.db`. The bot would then re-discover and re-send articles it already delivered to you. To fix this, the bot can sync state to a **private HF dataset repo** (free, native to Hugging Face, no size limits that matter for a few hundred KB of state).
+
+### How it works
+
+1. At the end of every pipeline run, `state_sync.upload_state()` uploads `state.db` + `seen.json` to your HF dataset repo.
+2. At startup, `state_sync.download_state()` pulls them back to local `/data` before the first scrape.
+3. The repo is created automatically on first upload if it doesn't exist (private by default).
+4. If `HF_TOKEN` or `HF_STATE_REPO` is not set, sync is silently disabled and the bot uses ephemeral storage (with the re-send-on-restart caveat above).
+
+### Setup
+
+1. Create an HF access token at https://huggingface.co/settings/tokens — type: **Read** + **Write** permissions.
+2. Create a private dataset repo at https://huggingface.co/new-dataset — name it `thedeepview-bot-state` (or whatever). Note the full name: `<your-username>/thedeepview-bot-state`.
+3. In your HF Space → Settings → Repository secrets, add:
+   - `HF_TOKEN` = the token from step 1
+   - `HF_STATE_REPO` = `<your-username>/thedeepview-bot-state`
+4. Restart the Space. The first pipeline run will upload state; subsequent restarts will restore it.
+
+The state files are tiny (`state.db` is typically 50-500 KB after a few weeks of runs, `seen.json` is 10-100 KB). HF dataset repos are free, so this costs nothing.
 
 ---
 
@@ -261,9 +289,10 @@ Visit `http://localhost:7860` for the status dashboard.
 ```
 .
 ├── app.py                 # FastAPI app + HTML dashboard + /wake endpoint
-├── scheduler.py           # Entry point: APScheduler (every 2h) + uvicorn
-├── pipeline.py            # Orchestrates scrape → fetch → batch-summarize → notify
+├── scheduler.py           # Entry point: APScheduler (every 2h) + uvicorn + state restore
+├── pipeline.py            # Orchestrates scrape → fetch → batch-summarize → notify → sync
 ├── config.py              # All config + source registry (env-var driven)
+├── state_sync.py          # HF Hub persistent state sync (upload/download state.db + seen.json)
 ├── utils.py               # Logger, httpx client, HTML-to-text, polite sleep
 ├── requirements.txt
 ├── Dockerfile             # HF Spaces-compatible Docker image

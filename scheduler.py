@@ -9,6 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from app import app, _run_in_background
 from config import cfg
 from pipeline import run_pipeline
+from state_sync import download_state
 from utils import logger
 
 
@@ -54,6 +55,12 @@ def main():
             "Set them in HF Space Secrets before launching. "
             "Pipeline will no-op until they are set."
         )
+
+    # Restore persistent state from HF Hub before any pipeline runs.
+    # This pulls state.db + seen.json so we don't re-send articles after
+    # a Space restart. No-op if HF_TOKEN/HF_STATE_REPO not configured.
+    logger.info("Restoring state from HF Hub (if configured)...")
+    download_state()
 
     sched = start_scheduler()
 

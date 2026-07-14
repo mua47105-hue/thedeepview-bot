@@ -22,6 +22,7 @@ from scraper.diff import (
 from scraper.discovery import discover_all
 from summarizer.gemini import summarize_batch
 from notifier.telegram import send_article
+from state_sync import upload_state
 from utils import logger, polite_sleep
 
 
@@ -43,6 +44,7 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
             discovered=0, new_articles=0, processed=0,
             telegram_sent=0, errors=0, gemini_calls=0,
         )
+        upload_state()  # sync the empty-run record to HF Hub
         return {"discovered": 0, "new": 0, "processed": 0, "sent": 0, "errors": 0, "gemini_calls": 0}
 
     discovered_urls = [r.url for r in discovered]
@@ -57,6 +59,7 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
             discovered=len(discovered_urls), new_articles=0, processed=0,
             telegram_sent=0, errors=0, gemini_calls=0,
         )
+        upload_state()  # sync the no-op run record to HF Hub
         return {"discovered": len(discovered_urls), "new": 0, "processed": 0,
                 "sent": 0, "errors": 0, "gemini_calls": 0}
 
@@ -92,6 +95,7 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
         seen = load_seen_urls()
         seen.update(to_process)
         save_seen_urls(seen)
+        upload_state()  # sync seen-URL update + run record to HF Hub
         return {"discovered": len(discovered_urls), "new": len(new_urls),
                 "processed": 0, "sent": 0, "errors": fetch_errors, "gemini_calls": 0}
 
@@ -206,4 +210,5 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
         "gemini_calls_today": get_gemini_calls_today(),
     }
     logger.info(f"=== Pipeline run finished: {summary} ===")
+    upload_state()  # sync state.db + seen.json to HF Hub (survives Space restart)
     return summary

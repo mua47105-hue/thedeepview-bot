@@ -118,6 +118,14 @@ class Config:
     db_path: Path = Path("/data/state.db")
     seen_path: Path = Path("/data/seen.json")
 
+    # ── Hugging Face Hub persistent state sync (optional) ───────────
+    # Free-tier HF Spaces have ephemeral storage — /data is wiped on restart.
+    # If HF_TOKEN + HF_STATE_REPO are set, the bot uploads state.db + seen.json
+    # to a private HF dataset repo at the end of each run, and downloads them
+    # back on startup. This survives Space restarts.
+    hf_token: str = ""
+    hf_state_repo: str = ""  # e.g. "mua47105-hue/thedeepview-bot-state"
+
     # ── Web server ──────────────────────────────────────────────────
     web_port: int = 7860
 
@@ -166,6 +174,8 @@ class Config:
             data_dir=data_dir,
             db_path=data_dir / "state.db",
             seen_path=data_dir / "seen.json",
+            hf_token=os.getenv("HF_TOKEN", ""),
+            hf_state_repo=os.getenv("HF_STATE_REPO", ""),
             web_port=int(os.getenv("PORT", "7860")),
         )
 
