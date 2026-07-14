@@ -9,3 +9,11 @@ python-dotenv==1.0.1
 tenacity==9.0.0
 feedparser==6.0.11
 huggingface_hub==0.26.2
+# Pin transitive deps that cause pip backtracking / version conflicts:
+# - grpcio-status: pip backtracks through 20+ versions without this pin (slow builds)
+# - protobuf: google-generativeai 0.8.3 needs <6 but pip tries 7.x first (runtime crash)
+# - pydantic: pin to avoid breaking changes in newest versions
+grpcio-status==1.71.2
+grpcio==1.71.2
+protobuf==5.29.6
+pydantic==2.9.2

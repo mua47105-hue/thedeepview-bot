@@ -163,7 +163,26 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
             continue
 
         if not summary:
-            send_errors += 1
+            # Gemini failed to produce a summary for this article.
+            # Send a fallback message so the user knows the article exists
+            # and that Gemini had an issue (instead of silent failure).
+            fallback_msg = (
+                f"⚠️ *Summary unavailable* (Gemini API issue)\n\n"
+                f"_{article.title}_\n"
+                f"Source: {article.source}\n"
+                f"🔗 [Read original]({article.url})"
+            )
+            if send_article(
+                {"title": article.title, "author": article.author,
+                 "published_at": article.published_at, "url": article.url,
+                 "image_url": article.image_url, "image_bytes": article.image_bytes,
+                 "source": article.source},
+                summary=fallback_msg,
+                category=category,
+            ):
+                sent += 1
+            else:
+                send_errors += 1
             continue
 
         article_dict = {

@@ -216,3 +216,106 @@ async def articles():
 @app.get("/runs")
 async def runs():
     return JSONResponse(get_recent_runs(limit=50))
+
+
+@app.get("/debug")
+async def debug():
+    """Diagnostic endpoint showing config, Gemini status, Telegram status.
+    Use this to debug without needing container logs."""
+    import httpx
+
+    # Check Gemini connectivity (list_models is free, doesn't count against quota)
+    gemini_status = {"configured": bool(cfg.gemini_api_key), "models": [], "error": None}
+    if cfg.gemini_api_key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=cfg.gemini_api_key)
+            models = list(genai.list_models())
+            gemini_status["models"] = [
+                m.name.replace("models/", "")
+                for m in models
+                if "generateContent" in (getattr(m, "supported_generation_methods", []) or [])
+            ][:20]
+            gemini_status["primary_model"] = cfg.gemini_primary_model
+            gemini_status["primary_available"] = cfg.gemini_primary_model in gemini_status["models"]
+        except Exception as e:
+            gemini_status["error"] = str(e)[:300]
+
+    # Check Telegram connectivity (getMe is free, doesn't send messages)
+    telegram_status = {"configured": bool(cfg.telegram_bot_token), "bot_info": None, "error": None}
+    if cfg.telegram_bot_token:
+        try:
+            resp = httpx.get(
+                f"https://api.telegram.org/bot{cfg.telegram_bot_token}/getMe",
+                timeout=httpx.Timeout(connect=10, read=15, write=10, pool=10),
+            )
+            data = resp.json()
+            if data.get("ok"):
+                telegram_status["bot_info"] = {
+                    "username": data["result"]["username"],
+                    "first_name": data["result"]["first_name"],
+                    "id": data["result"]["id"],
+                }
+            else:
+                telegram_status["error"] = str(data)[:300]
+        except Exception as e:
+            telegram_status["error"] = str(e)[:300]
+
+    return JSONResponse({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "config": {
+            "gemini_primary_model": cfg.gemini_primary_model,
+            "gemini_fallback_model": cfg.gemini_fallback_model,
+            "gemini_extra_fallbacks": list(cfg.gemini_extra_fallbacks),
+            "gemini_batch_max_articles": cfg.gemini_batch_max_articles,
+            "sources_count": len(cfg.sources),
+            "sources": [{"name": n, "kind": k} for n, k, _, _ in cfg.sources],
+            "data_dir": str(cfg.data_dir),
+            "web_port": cfg.web_port,
+        },
+        "env_vars": {
+            "GEMINI_API_KEY": "set" if cfg.gemini_api_key else "MISSING",
+            "TELEGRAM_BOT_TOKEN": "set" if cfg.telegram_bot_token else "MISSING",
+            "TELEGRAM_CHAT_ID": "set" if cfg.telegram_chat_id else "MISSING",
+            "HF_TOKEN": "set" if cfg.hf_token else "not set",
+            "HF_STATE_REPO": cfg.hf_state_repo or "not set",
+        },
+        "gemini": gemini_status,
+        "telegram": telegram_status,
+        "last_run": {
+            "at": _last_run_at,
+            "summary": _last_run_summary,
+        },
+        "quota": {
+            "calls_today": get_gemini_calls_today(),
+            "daily_limit": cfg.gemini_daily_limit,
+        },
+    })
+
+
+@app.post("/test-telegram")
+async def test_telegram():
+    """Send a test message to Telegram to verify connectivity.
+    Independent of the pipeline — use this to isolate Telegram issues."""
+    if not cfg.telegram_bot_token or not cfg.telegram_chat_id:
+        return JSONResponse({
+            "status": "error",
+            "message": "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set",
+        }, status_code=400)
+
+    import httpx
+    try:
+        url = f"https://api.telegram.org/bot{cfg.telegram_bot_token}/sendMessage"
+        payload = {
+            "chat_id": cfg.telegram_chat_id,
+            "text": "🧪 Test message from TheDeepView Bot\n\nIf you see this, Telegram sending works. The issue is elsewhere (likely Gemini model).",
+            "parse_mode": "Markdown",
+        }
+        resp = httpx.post(url, json=payload, timeout=httpx.Timeout(connect=15, read=30, write=10, pool=10))
+        data = resp.json()
+        if data.get("ok"):
+            return JSONResponse({"status": "ok", "message": "Test message sent successfully"})
+        else:
+            return JSONResponse({"status": "error", "telegram_response": data}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
