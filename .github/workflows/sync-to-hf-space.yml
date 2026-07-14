@@ -1,0 +1,103 @@
+# Sync GitHub → Hugging Face Space
+#
+# On every push to `main` (or manual trigger), this workflow mirrors the
+# GitHub repo into a Hugging Face Space repo. The Space then rebuilds
+# automatically from the Dockerfile.
+#
+# Setup (one-time):
+#   1. Create the HF Space: https://huggingface.co/new-space
+#      - SDK: Docker
+#      - Visibility: Private (recommended) or Public
+#      - Note the full repo id: <your-username>/<space-name>
+#   2. Create an HF access token: https://huggingface.co/settings/tokens
+#      - Type: Read + Write
+#   3. In your GITHUB repo → Settings → Secrets and variables → Actions
+#      → New repository secret, add:
+#        Name:  HF_TOKEN
+#        Value: <the token from step 2>
+#        Name:  HF_SPACE_REPO
+#        Value: <your-username>/<space-name>   (e.g. mua47105-hue/thedeepview-bot)
+#
+# After this workflow runs once, your Space will rebuild on every GitHub push.
+
+name: Sync to Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+    # Optional: only trigger when these paths change. Comment out to sync everything.
+    # paths-ignore:
+    #   - "README.md"
+    #   - ".github/**"
+  workflow_dispatch:
+    # Manual trigger from the Actions tab — lets you re-sync without a push
+
+# Prevent overlapping syncs on the same Space (could cause push conflicts)
+concurrency:
+  group: sync-to-hf-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync-to-space:
+    name: Mirror to HF Space
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitHub repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so we can do a clean mirror push
+
+      - name: Verify required secrets
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::Secret HF_TOKEN is not set. See .github/workflows/sync-to-hf-space.yml for setup instructions."
+            exit 1
+          fi
+          if [ -z "$HF_SPACE_REPO" ]; then
+            echo "::error::Secret HF_SPACE_REPO is not set (should be 'username/space-name'). See .github/workflows/sync-to-hf-space.yml for setup instructions."
+            exit 1
+          fi
+          echo "Target HF Space repo: $HF_SPACE_REPO"
+
+      - name: Configure git for HF push
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          # Cache HF credentials so we don't leak the token in remote URLs
+          git config --global credential.helper store
+          echo "https://user:${HF_TOKEN}@huggingface.co" > ~/.git-credentials
+
+      - name: Add HF Space as a remote
+        env:
+          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
+        run: |
+          # HF Spaces are pushed to https://huggingface.co/spaces/<user>/<name>
+          git remote add space "https://huggingface.co/spaces/${HF_SPACE_REPO}.git"
+          git remote -v
+
+      - name: Push main → HF Space main
+        env:
+          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
+        run: |
+          set -e
+          # Force-push to make HF Space an exact mirror of GitHub main.
+          # The Space rebuilds automatically after the push.
+          #
+          # Force-push is safe here because GitHub is our source of truth and
+          # we never edit files directly on the HF Space.
+          git push -f space main:main
+          echo ""
+          echo "✅ Successfully synced to https://huggingface.co/spaces/${HF_SPACE_REPO}"
+          echo "The Space will rebuild from the Dockerfile. Check the logs at:"
+          echo "  https://huggingface.co/spaces/${HF_SPACE_REPO}/logs"
+
+      - name: Clean up credentials
+        if: always()
+        run: |
+          rm -f ~/.git-credentials
+          git remote remove space || true

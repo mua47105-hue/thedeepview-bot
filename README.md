@@ -132,9 +132,28 @@ Pure opinion/culture/lifestyle pieces are marked `SKIP` and only the photo+capti
 
 ### Step 4: Push this code to the Space
 
-Either:
-- Clone the Space repo (`git clone https://huggingface.co/spaces/<you>/thedeepview-bot`), copy these files in, commit, push.
-- Or: push to GitHub and connect the Space to a GitHub repo (HF supports this in Settings → "GitHub sync").
+**Recommended: automated GitHub → HF sync (set up once, then just `git push` to GitHub).**
+
+This repo ships with a GitHub Actions workflow at `.github/workflows/sync-to-hf-space.yml` that mirrors `main` to your HF Space on every push. Setup:
+
+1. Create the HF Space (step 3 above) and note the full repo id: `<your-username>/<space-name>`.
+2. Create an HF access token at https://huggingface.co/settings/tokens — type: **Read** + **Write**.
+3. In your **GitHub** repo → Settings → Secrets and variables → Actions → New repository secret:
+   - `HF_TOKEN` = the HF token from step 2
+   - `HF_SPACE_REPO` = `<your-username>/<space-name>` (e.g. `mua47105-hue/thedeepview-bot`)
+4. Push to `main` — the workflow runs automatically and mirrors to HF. You can also trigger it manually from the Actions tab ("Run workflow" button).
+
+After the first sync, every `git push origin main` to GitHub will automatically update the HF Space and trigger a rebuild. The Space rebuilds from the Dockerfile (~2-4 minutes).
+
+**Alternative: manual push** (skip the workflow, push directly):
+
+```bash
+# One-time: add HF Space as a second remote
+git remote add space https://huggingface.co/spaces/<your-username>/<space-name>.git
+
+# Push to HF (use a token when prompted — your HF password won't work)
+git push space main
+```
 
 ### Step 5: Set Secrets
 
@@ -297,6 +316,8 @@ Visit `http://localhost:7860` for the status dashboard.
 ├── requirements.txt
 ├── Dockerfile             # HF Spaces-compatible Docker image
 ├── .env.example           # Copy to .env and fill in
+├── .github/workflows/
+│   └── sync-to-hf-space.yml  # GitHub → HF Space auto-sync on every push to main
 ├── scraper/
 │   ├── discovery.py       # Multi-source discovery (RSS + sitemap)
 │   ├── article.py         # Single-article fetcher (JSON-LD + og:image + body)
