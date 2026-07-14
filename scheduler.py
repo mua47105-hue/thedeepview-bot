@@ -56,15 +56,24 @@ def _deferred_startup():
     has bound the port and HF's health check has passed.
 
     Runs in this order:
-      1. download_state()  — restore HF Hub state (can be slow, but doesn't block port)
-      2. sleep 60s         — give HF time to mark Space as RUNNING
-      3. run_pipeline()    — first scrape cycle
+      1. download_state()           — restore HF Hub state (can be slow, but doesn't block port)
+      2. gemini.startup_self_check() — log which Gemini models the API key can use (no quota cost)
+      3. sleep 60s                   — give HF time to mark Space as RUNNING
+      4. run_pipeline()              — first scrape cycle
     """
     try:
         logger.info("[startup] restoring state from HF Hub (if configured)...")
         download_state()
     except Exception as e:
         logger.warning(f"[startup] download_state failed (non-fatal): {e}")
+
+    # Log which Gemini models are available — helps debug "model not available" errors
+    # without waiting for a full pipeline run. Does NOT count against quota.
+    try:
+        from summarizer.gemini import startup_self_check
+        startup_self_check()
+    except Exception as e:
+        logger.warning(f"[startup] gemini self-check failed (non-fatal): {e}")
 
     # Give HF's health check time to mark the Space as RUNNING before we
     # start hammering the network with the first pipeline run.

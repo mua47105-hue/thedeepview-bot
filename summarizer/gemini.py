@@ -295,6 +295,49 @@ def _call_gemini(model, prompt: str) -> str:
         return ""
 
 
+# Cache the first model that successfully responds, so we don't waste quota
+# re-probing on every pipeline run.
+_working_model: str | None = None
+
+
+def _discover_available_models() -> list[str]:
+    """Call genai.list_models() to find all models the API key can use.
+
+    Returns a list of model names (sorted newest-first by name) that support
+    generateContent. Used as a last-resort fallback if all hardcoded model
+    names fail.
+    """
+    try:
+        genai.configure(api_key=cfg.gemini_api_key)
+        models = list(genai.list_models())
+        supported = [
+            m.name.replace("models/", "")
+            for m in models
+            if "generateContent" in (getattr(m, "supported_generation_methods", []) or [])
+        ]
+        # Sort so newer-sounding models come first (gemini-3.x > gemini-2.x > gemini-1.x)
+        supported.sort(reverse=True)
+        logger.info(f"[gemini] list_models() returned {len(supported)} usable models: {supported[:10]}")
+        return supported
+    except Exception as e:
+        logger.warning(f"[gemini] list_models() failed: {e}")
+        return []
+
+
+def _candidate_models() -> list[str]:
+    """Build the ordered list of models to try, deduplicated."""
+    candidates = [cfg.gemini_primary_model, cfg.gemini_fallback_model]
+    candidates.extend(cfg.gemini_extra_fallbacks)
+    # Dedupe while preserving order
+    seen = set()
+    result = []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result
+
+
 def summarize_batch(articles: list[dict]) -> list[dict]:
     """
     Summarize N articles in ONE Gemini API call.
@@ -302,6 +345,7 @@ def summarize_batch(articles: list[dict]) -> list[dict]:
         {category, status, summary}
     On total failure, returns list of None-dicts so caller can handle gracefully.
     """
+    global _working_model
     if not articles:
         return []
 
@@ -315,9 +359,20 @@ def summarize_batch(articles: list[dict]) -> list[dict]:
             "consider reducing gemini_batch_max_articles"
         )
 
-    for model_name in (cfg.gemini_primary_model, cfg.gemini_fallback_model):
+    genai.configure(api_key=cfg.gemini_api_key)
+
+    # Build the list of models to try.
+    # If we have a cached working model from a previous run, try it FIRST.
+    candidates = []
+    if _working_model:
+        candidates.append(_working_model)
+    candidates.extend(_candidate_models())
+    # Dedupe
+    seen = set()
+    candidates = [c for c in candidates if not (c in seen or seen.add(c))]
+
+    for model_name in candidates:
         try:
-            genai.configure(api_key=cfg.gemini_api_key)
             model = genai.GenerativeModel(
                 model_name=model_name,
                 generation_config={
@@ -327,34 +382,107 @@ def summarize_batch(articles: list[dict]) -> list[dict]:
                 },
             )
             logger.info(
-                f"Calling Gemini model={model_name} for batch of {len(articles)} articles "
+                f"[gemini] calling model={model_name} for batch of {len(articles)} articles "
                 f"(~{estimated_input_tokens} input tokens)"
             )
             response_text = _call_gemini(model, prompt)
             if not response_text or len(response_text) < 100:
-                logger.warning(f"Empty response from {model_name}")
+                logger.warning(f"[gemini] empty response from {model_name}")
                 continue
 
             results = parse_batch_response(response_text, expected_count=len(articles))
             successful = sum(1 for r in results if r.get("summary") or r.get("status") == "SKIP")
             logger.info(
-                f"Gemini batch returned {successful}/{len(articles)} valid results"
+                f"[gemini] {model_name} returned {successful}/{len(articles)} valid results"
             )
 
             # Accept if at least half parsed successfully
             if successful >= max(1, len(articles) // 2):
+                _working_model = model_name  # cache for future runs
+                logger.info(f"[gemini] cached working model: {model_name}")
                 return results
 
             logger.warning(
-                f"Parsing yielded only {successful}/{len(articles)} results; trying fallback"
+                f"[gemini] parsing yielded only {successful}/{len(articles)} results; trying fallback"
             )
         except Exception as e:
-            logger.warning(f"Gemini batch call failed on {model_name}: {e}")
+            err_msg = str(e)
+            # Distinguish "model not available" from "quota exceeded" in logs
+            if "no longer available" in err_msg or "not found" in err_msg.lower():
+                logger.warning(f"[gemini] {model_name} is deprecated/not available: {err_msg[:150]}")
+            elif "quota" in err_msg.lower() or "429" in err_msg:
+                logger.warning(f"[gemini] {model_name} quota exceeded: {err_msg[:150]}")
+            else:
+                logger.warning(f"[gemini] {model_name} call failed: {err_msg[:150]}")
             continue
 
+    # Last resort: try list_models() discovery if we haven't already
+    if not _working_model:
+        logger.warning("[gemini] all hardcoded models failed; trying list_models() discovery")
+        discovered = _discover_available_models()
+        # Filter out ones we already tried
+        untried = [m for m in discovered if m not in candidates]
+        for model_name in untried[:3]:  # only try top 3 to limit quota burn
+            try:
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    generation_config={
+                        "temperature": cfg.gemini_temperature,
+                        "max_output_tokens": cfg.gemini_max_output_tokens,
+                        "top_p": 0.95,
+                    },
+                )
+                logger.info(f"[gemini] trying discovered model={model_name}")
+                response_text = _call_gemini(model, prompt)
+                if not response_text or len(response_text) < 100:
+                    continue
+                results = parse_batch_response(response_text, expected_count=len(articles))
+                successful = sum(1 for r in results if r.get("summary") or r.get("status") == "SKIP")
+                if successful >= max(1, len(articles) // 2):
+                    _working_model = model_name
+                    logger.info(f"[gemini] discovered working model: {model_name}")
+                    return results
+            except Exception as e:
+                logger.warning(f"[gemini] discovered model {model_name} failed: {str(e)[:150]}")
+                continue
+
     # Total failure — return empty results so pipeline can record articles as failed
-    logger.error("All Gemini models failed for batch")
+    logger.error("[gemini] ALL models failed for batch (hardcoded + discovered)")
     return [
         {"category": None, "status": None, "summary": None}
         for _ in articles
     ]
+
+
+def startup_self_check() -> None:
+    """Call this once on app startup to log what Gemini models are available.
+
+    Does NOT count against quota — list_models() is a metadata API, not a
+    generate-content call. Helps debug "model not available" errors without
+    waiting for a full pipeline run.
+    """
+    if not cfg.gemini_api_key:
+        logger.warning("[gemini] self-check skipped: GEMINI_API_KEY not set")
+        return
+    try:
+        genai.configure(api_key=cfg.gemini_api_key)
+        models = list(genai.list_models())
+        supported = [
+            m.name.replace("models/", "")
+            for m in models
+            if "generateContent" in (getattr(m, "supported_generation_methods", []) or [])
+        ]
+        logger.info(f"[gemini] self-check: API key has access to {len(supported)} generateContent models:")
+        for name in supported:
+            logger.info(f"[gemini]   - {name}")
+
+        # Verify our primary model is in the list
+        if cfg.gemini_primary_model in supported:
+            logger.info(f"[gemini] self-check: primary model '{cfg.gemini_primary_model}' is available ✓")
+        else:
+            logger.warning(
+                f"[gemini] self-check: primary model '{cfg.gemini_primary_model}' is NOT in the available list! "
+                f"Set GEMINI_PRIMARY_MODEL to one of: {supported[:5]}"
+            )
+    except Exception as e:
+        logger.warning(f"[gemini] self-check failed (non-fatal): {e}")

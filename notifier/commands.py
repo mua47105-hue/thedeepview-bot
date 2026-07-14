@@ -17,6 +17,17 @@ from utils import logger
 
 TELEGRAM_API = "https://api.telegram.org"
 
+# Telegram long-poll can legitimately take up to 50 seconds (we ask for 30s
+# timeout in the getUpdates request). HF Spaces → api.telegram.org can have
+# slow SSL handshakes, so we use a split timeout: short connect (10s) but
+# long read (90s) so the long-poll has time to return.
+_HTTP_TIMEOUT = httpx.Timeout(
+    connect=15.0,   # SSL handshake + TCP connect
+    read=90.0,      # long-poll can take up to 50s; give buffer
+    write=10.0,
+    pool=10.0,
+)
+
 HELP_TEXT = (
     "🤖 *TheDeepView Bot — Commands*\n\n"
     "/start — show this help\n"
@@ -32,12 +43,12 @@ def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
     url = f"{TELEGRAM_API}/bot{cfg.telegram_bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     try:
-        with httpx.Client(timeout=15) as client:
+        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
             resp = client.post(url, json=payload)
         if resp.status_code == 400:
             # Markdown parse failure — retry as plain text
             payload.pop("parse_mode", None)
-            with httpx.Client(timeout=15) as client:
+            with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
                 client.post(url, json=payload)
     except Exception as e:
         logger.warning(f"command reply failed: {e}")
@@ -119,20 +130,30 @@ def _handle_update(update: dict) -> None:
 
 
 def _long_poll_loop() -> None:
-    """Run getUpdates in a loop. Exits cleanly on thread shutdown."""
+    """Run getUpdates in a loop. Exits cleanly on thread shutdown.
+
+    Uses a 50-second Telegram-side long-poll timeout, with split httpx
+    timeouts (15s connect / 90s read) to handle HF Space → Telegram SSL
+    handshake variability. On errors, backs off exponentially up to 60s
+    so we don't spam the logs.
+    """
     base_url = f"{TELEGRAM_API}/bot{cfg.telegram_bot_token}/getUpdates"
     offset = 0  # 0 = first call returns all pending updates; subsequent calls use offset
+    consecutive_errors = 0
     logger.info("Telegram command poller started")
 
     while True:
         try:
-            params = {"timeout": 30, "offset": offset, "allowed_updates": ["message"]}
-            with httpx.Client(timeout=45) as client:
+            # Telegram-side long-poll: 50 seconds. Combined with our 90s read
+            # timeout, this gives plenty of buffer for slow SSL handshakes.
+            params = {"timeout": 50, "offset": offset, "allowed_updates": ["message"]}
+            with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
                 resp = client.get(base_url, params=params)
             data = resp.json()
             if not data.get("ok"):
                 logger.warning(f"getUpdates not ok: {data}")
-                time.sleep(5)
+                consecutive_errors += 1
+                _backoff_sleep(consecutive_errors)
                 continue
 
             updates = data.get("result") or []
@@ -142,9 +163,33 @@ def _long_poll_loop() -> None:
                     _handle_update(upd)
                 except Exception as e:
                     logger.warning(f"command handler error: {e}")
+
+            # Reset error counter on any successful getUpdates call
+            consecutive_errors = 0
+        except httpx.TimeoutException as e:
+            # SSL handshake or read timeout — common on HF free tier, usually transient
+            consecutive_errors += 1
+            logger.warning(
+                f"long-poll timeout (#{consecutive_errors}): {e} — "
+                f"backing off {_backoff_seconds(consecutive_errors)}s"
+            )
+            _backoff_sleep(consecutive_errors)
         except Exception as e:
-            logger.warning(f"long-poll loop error: {e}")
-            time.sleep(5)
+            consecutive_errors += 1
+            logger.warning(
+                f"long-poll loop error (#{consecutive_errors}): {e} — "
+                f"backing off {_backoff_seconds(consecutive_errors)}s"
+            )
+            _backoff_sleep(consecutive_errors)
+
+
+def _backoff_seconds(consecutive_errors: int) -> float:
+    """Exponential backoff: 5s, 10s, 20s, 40s, capped at 60s."""
+    return min(60.0, 5.0 * (2 ** max(0, consecutive_errors - 1)))
+
+
+def _backoff_sleep(consecutive_errors: int) -> None:
+    time.sleep(_backoff_seconds(consecutive_errors))
 
 
 _started = False

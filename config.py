@@ -92,10 +92,20 @@ class Config:
 
     # ── Gemini ──────────────────────────────────────────────────────
     gemini_api_key: str = ""
-    # gemini-2.5-flash is the current free-tier model as of 2026.
-    # gemini-3.5-flash is kept as a fallback for forward compatibility.
-    gemini_primary_model: str = "gemini-2.5-flash"
-    gemini_fallback_model: str = "gemini-2.0-flash"
+    # As of mid-2026, Google has deprecated gemini-2.0-flash and gemini-2.5-flash
+    # for new free-tier users. The current free-tier model is gemini-3.5-flash.
+    # We try models in order; first one that works is used for the run.
+    # Override with GEMINI_PRIMARY_MODEL + GEMINI_FALLBACK_MODEL env vars if needed.
+    gemini_primary_model: str = "gemini-3.5-flash"
+    gemini_fallback_model: str = "gemini-3.0-flash"
+    # Additional fallbacks tried if both primary and fallback fail.
+    # Ordered newest-first so we hit the most capable available model.
+    gemini_extra_fallbacks: tuple = (
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+    )
     gemini_temperature: float = 0.4
     # 16384 tokens ≈ 12K words of output — enough for 15 detailed summaries in one batch
     gemini_max_output_tokens: int = 16384
@@ -163,8 +173,8 @@ class Config:
 
         return cls(
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
-            gemini_primary_model=os.getenv("GEMINI_PRIMARY_MODEL", "gemini-2.5-flash"),
-            gemini_fallback_model=os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.0-flash"),
+            gemini_primary_model=os.getenv("GEMINI_PRIMARY_MODEL", "gemini-3.5-flash"),
+            gemini_fallback_model=os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.0-flash"),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
             gemini_daily_limit=int(os.getenv("GEMINI_DAILY_LIMIT", "20")),
