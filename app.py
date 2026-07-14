@@ -242,12 +242,20 @@ async def debug():
             gemini_status["error"] = str(e)[:300]
 
     # Check Telegram connectivity (getMe is free, doesn't send messages)
-    telegram_status = {"configured": bool(cfg.telegram_bot_token), "bot_info": None, "error": None}
+    telegram_status = {
+        "configured": bool(cfg.telegram_bot_token),
+        "api_base": cfg.telegram_api_base,
+        "using_proxy": cfg.telegram_api_base != "https://api.telegram.org",
+        "bot_info": None,
+        "error": None,
+    }
     if cfg.telegram_bot_token:
         try:
+            base = cfg.telegram_api_base.rstrip("/")
             resp = httpx.get(
-                f"https://api.telegram.org/bot{cfg.telegram_bot_token}/getMe",
-                timeout=httpx.Timeout(connect=10, read=15, write=10, pool=10),
+                f"{base}/bot{cfg.telegram_bot_token}/getMe",
+                timeout=httpx.Timeout(connect=15, read=30, write=10, pool=10),
+                transport=httpx.HTTPTransport(local_address="0.0.0.0"),
             )
             data = resp.json()
             if data.get("ok"):
@@ -259,7 +267,13 @@ async def debug():
             else:
                 telegram_status["error"] = str(data)[:300]
         except Exception as e:
-            telegram_status["error"] = str(e)[:300]
+            err_msg = str(e)[:300]
+            telegram_status["error"] = err_msg
+            if "handshake" in err_msg.lower() or "timeout" in err_msg.lower():
+                telegram_status["hint"] = (
+                    "HF Spaces blocks api.telegram.org. Deploy the proxy in "
+                    "proxy/cloudflare-worker.js and set TELEGRAM_API_BASE env var."
+                )
 
     return JSONResponse({
         "timestamp": datetime.now(timezone.utc).isoformat(),

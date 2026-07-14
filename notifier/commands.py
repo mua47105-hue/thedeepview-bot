@@ -18,23 +18,23 @@ from utils import logger
 TELEGRAM_API = "https://api.telegram.org"
 
 # ── HF Spaces firewall workaround ───────────────────────────────────────────
-# HF Spaces' internal proxy drops idle TCP connections after ~45 seconds.
-# If we use a long-poll timeout of 50s, the connection sits idle for 50s
-# waiting for messages, gets killed by the firewall, and the next request
-# hits '_ssl.c:999: The handshake operation timed out'.
+# HF Spaces BLOCKS api.telegram.org at the TLS/SNI level (intentional policy
+# to prevent bot abuse on free tier). You MUST deploy an external proxy
+# (Cloudflare Worker, Vercel, Railway) and set TELEGRAM_API_BASE env var.
 #
-# FIX: use a 15-second long-poll so data flows every 15s — the firewall
-# never sees the connection as idle. httpx read timeout is 30s (buffer
-# above the 15s long-poll for network latency).
+# See: proxy/cloudflare-worker.js for a ready-to-deploy proxy.
 #
-# Reference: https://github.com/encode/httpx/discussions (HF Spaces pattern)
+# The long-poll timeout is 15s (not 50s) so data flows frequently and HF's
+# internal proxy doesn't drop idle connections.
 _TELEGRAM_LONG_POLL_SECONDS = 15
 _HTTP_TIMEOUT = httpx.Timeout(
-    connect=15.0,   # SSL handshake + TCP connect
-    read=30.0,      # buffer above 15s long-poll
+    connect=30.0,   # generous for proxy SSL handshake
+    read=45.0,      # buffer above 15s long-poll
     write=10.0,
     pool=10.0,
 )
+# Force IPv4 as defense-in-depth
+_HTTP_TRANSPORT = httpx.HTTPTransport(local_address="0.0.0.0")
 
 HELP_TEXT = (
     "🤖 *TheDeepView Bot — Commands*\n\n"
@@ -48,15 +48,16 @@ HELP_TEXT = (
 
 
 def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
-    url = f"{TELEGRAM_API}/bot{cfg.telegram_bot_token}/sendMessage"
+    base = cfg.telegram_api_base.rstrip("/")
+    url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     try:
-        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+        with httpx.Client(timeout=_HTTP_TIMEOUT, transport=_HTTP_TRANSPORT) as client:
             resp = client.post(url, json=payload)
         if resp.status_code == 400:
             # Markdown parse failure — retry as plain text
             payload.pop("parse_mode", None)
-            with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+            with httpx.Client(timeout=_HTTP_TIMEOUT, transport=_HTTP_TRANSPORT) as client:
                 client.post(url, json=payload)
     except Exception as e:
         logger.warning(f"command reply failed: {e}")
@@ -151,14 +152,15 @@ def _long_poll_loop() -> None:
     keeps the TCP connection warm). On connection errors, the client is
     recreated to replace any dead pooled connections.
     """
-    base_url = f"{TELEGRAM_API}/bot{cfg.telegram_bot_token}/getUpdates"
+    base_url = f"{cfg.telegram_api_base.rstrip('/')}/bot{cfg.telegram_bot_token}/getUpdates"
     offset = 0  # 0 = first call returns all pending updates; subsequent calls use offset
     consecutive_errors = 0
-    logger.info("Telegram command poller started (15s long-poll for HF Spaces firewall)")
+    logger.info(
+        f"Telegram command poller started (15s long-poll, base={cfg.telegram_api_base})"
+    )
 
     # Persistent client for connection reuse — keeps TCP connection warm
-    # so HF's firewall doesn't see it as idle.
-    client = httpx.Client(timeout=_HTTP_TIMEOUT)
+    client = httpx.Client(timeout=_HTTP_TIMEOUT, transport=_HTTP_TRANSPORT)
 
     while True:
         try:
@@ -200,7 +202,7 @@ def _long_poll_loop() -> None:
                 client.close()
             except Exception:
                 pass
-            client = httpx.Client(timeout=_HTTP_TIMEOUT)
+            client = httpx.Client(timeout=_HTTP_TIMEOUT, transport=_HTTP_TRANSPORT)
             _backoff_sleep(consecutive_errors)
 
         except Exception as e:

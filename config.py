@@ -122,6 +122,13 @@ class Config:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     telegram_image_max_bytes: int = 5_000_000
+    # Base URL for Telegram Bot API. Defaults to the official endpoint.
+    # HF Spaces BLOCKS api.telegram.org at the TLS/SNI level (intentional
+    # policy to prevent bot abuse on free tier). To work around this, deploy
+    # a Cloudflare Worker or Vercel proxy (see proxy/cloudflare-worker.js)
+    # and set TELEGRAM_API_BASE to your proxy URL, e.g.:
+    #   TELEGRAM_API_BASE=https://my-tg-proxy.workers.dev
+    telegram_api_base: str = "https://api.telegram.org"
 
     # ── Storage ─────────────────────────────────────────────────────
     data_dir: Path = Path("/data")
@@ -177,6 +184,7 @@ class Config:
             gemini_fallback_model=os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.0-flash"),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+            telegram_api_base=os.getenv("TELEGRAM_API_BASE", "https://api.telegram.org"),
             gemini_daily_limit=int(os.getenv("GEMINI_DAILY_LIMIT", "20")),
             gemini_safety_threshold=int(os.getenv("GEMINI_SAFETY_THRESHOLD", "18")),
             gemini_batch_max_articles=int(os.getenv("GEMINI_BATCH_MAX_ARTICLES", "15")),
