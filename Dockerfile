@@ -1,4 +1,4 @@
-# Dockerfile for TheDeepView Bot — Hugging Face Spaces (Docker SDK, free CPU tier)
+# Dockerfile for TheDeepView Bot — works on Render, Hugging Face Spaces, or any Docker host
 FROM python:3.11-slim
 
 # Install tini for proper PID 1 signal handling (clean shutdown on SIGTERM)
@@ -15,17 +15,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create data directory (HF mounts /data automatically when persistent storage enabled)
+# Create data directory for SQLite state + seen.json
 RUN mkdir -p /data
 ENV DATA_DIR=/data
+# Render sets PORT automatically; default to 7860 for HF Spaces compatibility
 ENV PORT=7860
 
-# Expose the port HF expects (7860 for Spaces)
+# Expose port (Render uses the PORT env var, HF Spaces uses 7860)
 EXPOSE 7860
 
 # Use tini as init, then run scheduler (which starts uvicorn + APScheduler + state restore).
-# NOTE: do NOT use 'python -m scheduler.py' — the -m flag expects a module name (no .py).
-#       Also avoid 'python -m scheduler' — that risks importing Python's stdlib 'scheduler' module.
-#       Running the file directly is the safest pattern.
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "scheduler.py"]

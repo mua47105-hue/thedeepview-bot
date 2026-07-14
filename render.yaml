@@ -1,0 +1,41 @@
+# Render Blueprint for TheDeepView Bot
+# https://render.com/docs/blueprint-spec
+#
+# Deploy:
+#   1. Go to https://dashboard.render.com → New → Blueprint
+#   2. Select your GitHub repo (mua47105-hue/thedeepview-bot)
+#   3. Render will detect this render.yaml file
+#   4. Add the environment variables (see envVars below) as secrets
+#   5. Click Apply
+#
+# Render free tier: 750 hours/month, 512MB RAM, sleeps after 15 min inactivity.
+# To prevent sleeping, set up an external uptime monitor (cron-job.org, UptimeRobot)
+# that pings https://<your-service>.onrender.com/health every 10 minutes.
+
+services:
+  - type: web
+    name: thedeepview-bot
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # set manually in Render dashboard (secret)
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      # Optional: persistent state sync (HF Hub dataset repo)
+      # - key: HF_TOKEN
+      #   sync: false
+      # - key: HF_STATE_REPO
+      #   sync: false
+      # Optional: override default Gemini model
+      # - key: GEMINI_PRIMARY_MODEL
+      #   value: gemini-3.5-flash
+      # Optional: override Telegram API base (not needed on Render — direct connection works)
+      # - key: TELEGRAM_API_BASE
+      #   value: https://api.telegram.org

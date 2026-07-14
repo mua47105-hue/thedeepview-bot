@@ -1,23 +1,29 @@
 """
 Interactive Telegram bot commands via long-polling.
 
-Uses urllib (Python stdlib) instead of httpx to avoid TLS session caching
-issues with Cloudflare Workers from HF Spaces. Every request is a fresh
-TCP+TLS connection — no pooling, no session reuse, no SSL errors.
+Runs in a background daemon thread alongside the FastAPI server.
+Responds to: /start, /status, /quota, /latest, /wake, /help
+
+On Render (or any normal host), this works directly with api.telegram.org.
 """
 from __future__ import annotations
 
-import json
 import threading
 import time
-import urllib.parse
-import urllib.request
+
+import httpx
 
 from config import cfg
 from scraper.diff import get_gemini_calls_today, get_recent_articles, get_recent_runs
 from utils import logger
 
-_TELEGRAM_LONG_POLL_SECONDS = 15
+_TELEGRAM_LONG_POLL_SECONDS = 30
+_HTTP_TIMEOUT = httpx.Timeout(
+    connect=15.0,
+    read=45.0,   # buffer above 30s long-poll
+    write=10.0,
+    pool=10.0,
+)
 
 HELP_TEXT = (
     "🤖 *TheDeepView Bot — Commands*\n\n"
@@ -31,27 +37,17 @@ HELP_TEXT = (
 
 
 def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
-    """Send a text message via GET (urllib)."""
     base = cfg.telegram_api_base.rstrip("/")
-    params = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
-    url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage?" + urllib.parse.urlencode(params)
+    url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "TheDeepViewBot/2.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            resp.read()
-    except urllib.error.HTTPError as e:
-        if e.code == 400 and parse_mode:
+        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+            resp = client.post(url, json=payload)
+        if resp.status_code == 400:
             # Markdown parse failure — retry as plain text
-            params.pop("parse_mode", None)
-            url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage?" + urllib.parse.urlencode(params)
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "TheDeepViewBot/2.0"})
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    resp.read()
-            except Exception:
-                pass
-        else:
-            logger.warning(f"command reply HTTP {e.code}: {e.reason}")
+            payload.pop("parse_mode", None)
+            with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+                client.post(url, json=payload)
     except Exception as e:
         logger.warning(f"command reply failed: {e}")
 
@@ -127,33 +123,23 @@ def _handle_update(update: dict) -> None:
 
 
 def _long_poll_loop() -> None:
-    """Run getUpdates in a loop using urllib (not httpx).
-
-    Each request is a fresh urllib.request.urlopen() call — no connection
-    pooling, no TLS session caching. This eliminates the SSL handshake
-    timeout / SSL EOF errors that httpx was causing on the 2nd+ request.
-    """
-    base = cfg.telegram_api_base.rstrip("/")
-    url_base = f"{base}/bot{cfg.telegram_bot_token}/getUpdates"
+    """Run getUpdates in a loop using a persistent httpx.Client."""
+    base_url = f"{cfg.telegram_api_base.rstrip('/')}/bot{cfg.telegram_bot_token}/getUpdates"
     offset = 0
     consecutive_errors = 0
-    logger.info(
-        f"Telegram command poller started (15s long-poll, base={cfg.telegram_api_base}, urllib)"
-    )
+    logger.info(f"Telegram command poller started (base={cfg.telegram_api_base})")
+
+    client = httpx.Client(timeout=_HTTP_TIMEOUT)
 
     while True:
         try:
             params = {
                 "timeout": _TELEGRAM_LONG_POLL_SECONDS,
                 "offset": offset,
-                "allowed_updates": "message",
+                "allowed_updates": ["message"],
             }
-            url = url_base + "?" + urllib.parse.urlencode(params)
-            req = urllib.request.Request(url, headers={"User-Agent": "TheDeepViewBot/2.0"})
-            # Timeout = long-poll (15s) + buffer (20s) = 35s
-            with urllib.request.urlopen(req, timeout=35) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-
+            resp = client.get(base_url, params=params)
+            data = resp.json()
             if not data.get("ok"):
                 logger.warning(f"getUpdates not ok: {data}")
                 consecutive_errors += 1
@@ -170,10 +156,23 @@ def _long_poll_loop() -> None:
 
             consecutive_errors = 0
 
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            consecutive_errors += 1
+            logger.warning(
+                f"long-poll connection error (#{consecutive_errors}): {e} — "
+                f"recreating client, backing off {_backoff_seconds(consecutive_errors)}s"
+            )
+            try:
+                client.close()
+            except Exception:
+                pass
+            client = httpx.Client(timeout=_HTTP_TIMEOUT)
+            _backoff_sleep(consecutive_errors)
+
         except Exception as e:
             consecutive_errors += 1
             logger.warning(
-                f"long-poll error (#{consecutive_errors}): {type(e).__name__}: {e} — "
+                f"long-poll loop error (#{consecutive_errors}): {e} — "
                 f"backing off {_backoff_seconds(consecutive_errors)}s"
             )
             _backoff_sleep(consecutive_errors)

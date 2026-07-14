@@ -36,19 +36,9 @@ def _run_in_background():
 
 @app.on_event("startup")
 def _on_startup() -> None:
-    # Command poller DISABLED — HF Spaces only allows ONE concurrent TLS
-    # connection to the same external host. The long-poll loop holds a
-    # connection for 15s, which blocks ALL other proxy connections (sendMessage,
-    # sendPhoto, etc.) causing SSL EOF errors.
-    #
-    # The bot's primary function is SENDING summaries (not receiving commands),
-    # so disabling the poller is acceptable. Commands (/status, /quota, etc.)
-    # can still be triggered via the web API: /wake, /status, /quota endpoints.
-    #
-    # To re-enable: uncomment the line below. But be aware that sendMessage
-    # will fail with SSL EOF while the long-poll is active.
-    # start_command_poller()
-    logger.info("Telegram command poller disabled (HF Spaces concurrent connection limit)")
+    # Start the interactive Telegram command poller in a background thread.
+    # Works on Render (or any normal host) — connects directly to api.telegram.org.
+    start_command_poller()
 
 
 @app.get("/health")
@@ -265,10 +255,9 @@ async def debug():
     }
     if cfg.telegram_bot_token:
         try:
-            import requests
             base = cfg.telegram_api_base.rstrip("/")
-            url = f"{base}/bot{cfg.telegram_bot_token}/getMe"
-            resp = requests.get(url, timeout=15, headers={"User-Agent": "TheDeepViewBot/2.0"})
+            with httpx.Client(timeout=httpx.Timeout(connect=10, read=20, write=10, pool=10)) as client:
+                resp = client.get(f"{base}/bot{cfg.telegram_bot_token}/getMe")
             data = resp.json()
             if data.get("ok"):
                 telegram_status["bot_info"] = {
