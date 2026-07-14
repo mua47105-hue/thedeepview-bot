@@ -252,11 +252,13 @@ async def debug():
     if cfg.telegram_bot_token:
         try:
             base = cfg.telegram_api_base.rstrip("/")
-            resp = httpx.get(
-                f"{base}/bot{cfg.telegram_bot_token}/getMe",
+            # NOTE: httpx.get() does NOT accept transport= arg.
+            # Must use httpx.Client() with transport, then call .get() on it.
+            with httpx.Client(
                 timeout=httpx.Timeout(connect=15, read=30, write=10, pool=10),
                 transport=httpx.HTTPTransport(local_address="0.0.0.0"),
-            )
+            ) as client:
+                resp = client.get(f"{base}/bot{cfg.telegram_bot_token}/getMe")
             data = resp.json()
             if data.get("ok"):
                 telegram_status["bot_info"] = {
@@ -310,26 +312,30 @@ async def debug():
 @app.post("/test-telegram")
 async def test_telegram():
     """Send a test message to Telegram to verify connectivity.
-    Independent of the pipeline — use this to isolate Telegram issues."""
+    Uses the same notifier module as the pipeline, so it tests the full
+    chain: proxy → Telegram API → your chat."""
     if not cfg.telegram_bot_token or not cfg.telegram_chat_id:
         return JSONResponse({
             "status": "error",
             "message": "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set",
         }, status_code=400)
 
-    import httpx
     try:
-        url = f"https://api.telegram.org/bot{cfg.telegram_bot_token}/sendMessage"
-        payload = {
-            "chat_id": cfg.telegram_chat_id,
-            "text": "🧪 Test message from TheDeepView Bot\n\nIf you see this, Telegram sending works. The issue is elsewhere (likely Gemini model).",
-            "parse_mode": "Markdown",
-        }
-        resp = httpx.post(url, json=payload, timeout=httpx.Timeout(connect=15, read=30, write=10, pool=10))
-        data = resp.json()
-        if data.get("ok"):
-            return JSONResponse({"status": "ok", "message": "Test message sent successfully"})
-        else:
-            return JSONResponse({"status": "error", "telegram_response": data}, status_code=500)
+        from notifier.telegram import _send_text
+        _send_text(
+            cfg.telegram_chat_id,
+            "🧪 Test message from TheDeepView Bot\n\n"
+            "If you see this, Telegram sending works through the proxy!\n"
+            f"Proxy: {cfg.telegram_api_base}",
+        )
+        return JSONResponse({
+            "status": "ok",
+            "message": "Test message sent successfully",
+            "proxy": cfg.telegram_api_base,
+        })
     except Exception as e:
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+        return JSONResponse({
+            "status": "error",
+            "message": str(e)[:500],
+            "proxy": cfg.telegram_api_base,
+        }, status_code=500)
