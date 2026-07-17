@@ -16,10 +16,10 @@ from config import cfg
 from scraper.diff import get_gemini_calls_today, get_recent_articles, get_recent_runs
 from utils import logger
 
-_TELEGRAM_LONG_POLL_SECONDS = 30
+_TELEGRAM_LONG_POLL_SECONDS = 20  # reduced from 30 (CF Worker stability)
 _HTTP_TIMEOUT = httpx.Timeout(
     connect=15.0,
-    read=45.0,   # buffer above 30s long-poll
+    read=35.0,   # buffer above 20s long-poll
     write=10.0,
     pool=10.0,
 )
@@ -31,7 +31,7 @@ _HTTP_LIMITS = httpx.Limits(
 )
 
 HELP_TEXT = (
-    "🤖 *TheDeepView Bot — Commands*\n\n"
+    "🤖 <b>TheDeepView Bot — Commands</b>\n\n"
     "/start — show this help\n"
     "/help  — show this help\n"
     "/status — last run summary + recent runs\n"
@@ -41,20 +41,12 @@ HELP_TEXT = (
 )
 
 
-def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
-    """Send a text message via GET request (POST fails to Cloudflare Workers from HF Spaces)."""
-    base = cfg.telegram_api_base.rstrip("/")
-    params = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
-    url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage?" + urllib.parse.urlencode(params)
+def _send_text(chat_id: str, text: str, parse_mode: str = "HTML") -> None:
+    """Send a text message via GET request (POST fails to Cloudflare Workers from HF Spaces).
+    Automatically chunks long text to stay under URL length limits."""
+    from notifier.telegram import _send_text as _send_text_chunked
     try:
-        with httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS) as client:
-            resp = client.get(url)
-        if resp.status_code == 400 and parse_mode:
-            # Markdown parse failure — retry as plain text
-            params.pop("parse_mode", None)
-            url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage?" + urllib.parse.urlencode(params)
-            with httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS) as client:
-                client.get(url)
+        _send_text_chunked(chat_id, text, parse_mode=parse_mode)
     except Exception as e:
         logger.warning(f"command reply failed: {e}")
 
@@ -63,10 +55,10 @@ def _format_status() -> str:
     runs = get_recent_runs(limit=5)
     if not runs:
         return "No pipeline runs recorded yet."
-    lines = ["🤖 *Recent Pipeline Runs*\n"]
+    lines = ["🤖 <b>Recent Pipeline Runs</b>\n"]
     for r in runs:
         lines.append(
-            f"• `{r.get('started_at', '')[:19]}` — "
+            f"• <code>{r.get('started_at', '')[:19]}</code> — "
             f"new={r.get('new_articles', 0)}, "
             f"sent={r.get('telegram_sent', 0)}, "
             f"errors={r.get('errors', 0)}, "
@@ -79,7 +71,7 @@ def _format_quota() -> str:
     today = get_gemini_calls_today()
     remaining = max(0, cfg.gemini_daily_limit - today)
     return (
-        f"📊 *Gemini Quota Today*\n\n"
+        f"📊 <b>Gemini Quota Today</b>\n\n"
         f"Used: {today} / {cfg.gemini_daily_limit}\n"
         f"Remaining: {remaining}\n"
         f"Safety threshold: {cfg.gemini_safety_threshold}\n"
@@ -91,13 +83,13 @@ def _format_latest() -> str:
     articles = get_recent_articles(limit=10)
     if not articles:
         return "No articles tracked yet."
-    lines = ["📰 *Latest 10 Articles*\n"]
+    lines = ["📰 <b>Latest 10 Articles</b>\n"]
     for a in articles:
         title = (a.get("title") or "Untitled")[:80]
         src = a.get("source") or "?"
         cat = (a.get("category") or "—").replace("_", " ")
         first_seen = (a.get("first_seen_at") or "")[:10]
-        lines.append(f"• [{src}] *{title}* ({cat}, {first_seen})")
+        lines.append(f"• [{src}] <b>{title}</b> ({cat}, {first_seen})")
     return "\n".join(lines)
 
 
@@ -135,10 +127,10 @@ def _long_poll_loop() -> None:
     offset = 0
     consecutive_errors = 0
     logger.info(
-        f"Telegram command poller started (30s long-poll, base={cfg.telegram_api_base})"
+        f"Telegram command poller started (20s long-poll, base={cfg.telegram_api_base})"
     )
 
-    client = httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS)
+    client = httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS, http2=False)
 
     while True:
         try:
@@ -176,7 +168,7 @@ def _long_poll_loop() -> None:
                 client.close()
             except Exception:
                 pass
-            client = httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS)
+            client = httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS, http2=False)
             _backoff_sleep(consecutive_errors)
 
         except Exception as e:

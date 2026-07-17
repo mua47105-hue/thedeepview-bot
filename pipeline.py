@@ -167,10 +167,10 @@ def run_pipeline(max_articles_per_run: int | None = None) -> dict:
             # Send a fallback message so the user knows the article exists
             # and that Gemini had an issue (instead of silent failure).
             fallback_msg = (
-                f"⚠️ *Summary unavailable* (Gemini API issue)\n\n"
-                f"_{article.title}_\n"
+                f"⚠️ <b>Summary unavailable</b> (Gemini API issue)\n\n"
+                f"<i>{article.title}</i>\n"
                 f"Source: {article.source}\n"
-                f"🔗 [Read original]({article.url})"
+                f'🔗 <a href="{article.url}">Read original</a>'
             )
             if send_article(
                 {"title": article.title, "author": article.author,

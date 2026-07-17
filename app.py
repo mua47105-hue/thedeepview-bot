@@ -256,10 +256,11 @@ async def debug():
     if cfg.telegram_bot_token:
         try:
             base = cfg.telegram_api_base.rstrip("/")
-            # Use GET with no keepalive (POST fails, keepalive causes SSL EOF)
+            # Use GET with no keepalive + http2=False (POST fails, keepalive causes SSL EOF)
             with httpx.Client(
                 timeout=httpx.Timeout(connect=10, read=20, write=10, pool=10),
                 limits=httpx.Limits(max_keepalive_connections=0, max_connections=5, keepalive_expiry=0.0),
+                http2=False,
             ) as client:
                 resp = client.get(f"{base}/bot{cfg.telegram_bot_token}/getMe")
             data = resp.json()
@@ -321,11 +322,11 @@ async def test_telegram():
 
     try:
         from notifier.telegram import _send_text
+        # SHORT test message — keeps URL well under 2000 char limit
         _send_text(
             cfg.telegram_chat_id,
-            "🧪 Test message from TheDeepView Bot\n\n"
-            "If you see this, Telegram sending works through the proxy!\n"
-            f"Proxy: {cfg.telegram_api_base}",
+            "🧪 <b>Test from TheDeepView Bot</b>\n\nTelegram sending works through the proxy!",
+            parse_mode="HTML",
         )
         return JSONResponse({
             "status": "ok",
