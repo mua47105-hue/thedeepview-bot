@@ -1,14 +1,25 @@
 """
-Telegram Bot API sender — supports sendPhoto (with image bytes) + sendMessage.
-For each article: sends photo with short caption first, then sendMessage with full summary.
+Telegram Bot API sender — uses GET for ALL API calls.
 
-On Render (or any normal host), we connect directly to api.telegram.org — no proxy needed.
-The TELEGRAM_API_BASE env var is still supported for exotic setups, but defaults to the
-official endpoint.
+CRITICAL FOR HF SPACES:
+  Hugging Face Spaces blocks api.telegram.org at the TLS/SNI level.
+  We route through a Cloudflare Worker proxy (TELEGRAM_API_BASE env var).
+
+  However, HF Spaces can do GET to Cloudflare Workers but NOT POST.
+  Confirmed by container logs: multiple GET getUpdates → 200 OK, but
+  POST sendMessage → SSL EOF every time.
+
+  So we convert ALL Telegram API calls to GET with query parameters.
+  The Telegram Bot API supports GET for every method.
+
+  For sendPhoto: instead of uploading image bytes (which requires POST
+  multipart), we pass the image URL directly. Telegram downloads the
+  image from the URL itself.
 """
 from __future__ import annotations
 
 import time
+import urllib.parse
 
 import httpx
 
@@ -19,12 +30,18 @@ from utils import logger
 # ── HTTP client configuration ────────────────────────────────────────────────
 _HTTP_TIMEOUT = httpx.Timeout(
     connect=15.0,
-    read=60.0,   # generous for sendPhoto with large images
-    write=30.0,
+    read=30.0,
+    write=15.0,
     pool=15.0,
 )
+# Disable keepalive — Cloudflare Workers close connections after each response,
+# and httpx's connection pool tries to reuse them → SSL EOF on 2nd request.
+_HTTP_LIMITS = httpx.Limits(
+    max_keepalive_connections=0,
+    max_connections=10,
+    keepalive_expiry=0.0,
+)
 
-# Persistent client for connection reuse
 _client: httpx.Client | None = None
 
 
@@ -34,6 +51,7 @@ def _get_client() -> httpx.Client:
     if _client is None or _client.is_closed:
         _client = httpx.Client(
             timeout=_HTTP_TIMEOUT,
+            limits=_HTTP_LIMITS,
             headers={"User-Agent": "TheDeepViewBot/2.0"},
         )
     return _client
@@ -50,14 +68,18 @@ def _recreate_client():
     _client = None
 
 
-def _api_url(method: str) -> str:
-    """Build a Telegram Bot API URL."""
+def _api_url(method: str, params: dict | None = None) -> str:
+    """Build a Telegram Bot API URL with GET query parameters."""
     base = cfg.telegram_api_base.rstrip("/")
-    return f"{base}/bot{cfg.telegram_bot_token}/{method}"
+    url = f"{base}/bot{cfg.telegram_bot_token}/{method}"
+    if params:
+        clean = {k: str(v) for k, v in params.items() if v is not None}
+        url += "?" + urllib.parse.urlencode(clean)
+    return url
 
 
-def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
-    """Make an HTTP request with retry logic.
+def _get_with_retry(method: str, url: str) -> dict:
+    """Make a GET request with retry logic.
 
     Retries up to 3 times with short backoff (1s, 3s) on connection errors.
     """
@@ -67,8 +89,20 @@ def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
     for attempt in range(1, max_attempts + 1):
         try:
             client = _get_client()
-            resp = client.post(url, **kwargs)
-            return resp
+            resp = client.get(url)
+            try:
+                return resp.json()
+            except Exception:
+                # Non-JSON response (e.g., HTML error page from proxy)
+                logger.error(
+                    f"Telegram API {method} returned non-JSON: "
+                    f"HTTP {resp.status_code}, body={resp.text[:200]}"
+                )
+                if attempt == max_attempts:
+                    raise
+                _recreate_client()
+                time.sleep(backoff_seconds[attempt - 1])
+                continue
         except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
             if attempt == max_attempts:
                 logger.error(
@@ -84,49 +118,61 @@ def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
             _recreate_client()
             time.sleep(wait)
         except Exception as e:
-            logger.error(f"Telegram API {method} failed (unexpected error): {e}")
-            raise
-    raise RuntimeError("unreachable")  # type: ignore
+            logger.error(f"Telegram API {method} failed (unexpected error): {type(e).__name__}: {e}")
+            if attempt == max_attempts:
+                raise
+            time.sleep(backoff_seconds[attempt - 1])
+    raise RuntimeError(f"Telegram API {method} exhausted retries")  # type: ignore
 
 
-# ── Telegram API methods ────────────────────────────────────────────────────
+# ── Telegram API methods (all use GET) ──────────────────────────────────────
 
 
 def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> dict:
-    url = _api_url("sendMessage")
-    payload = {
+    """Send a text message via GET request."""
+    url = _api_url("sendMessage", {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": parse_mode,
-        "disable_web_page_preview": False,
-    }
-    resp = _request_with_retry("sendMessage", url, json=payload)
-    if resp.status_code != 200:
-        if resp.status_code == 400:
-            logger.warning(f"Markdown parse failed, retrying as plain text: {resp.text[:200]}")
-            payload.pop("parse_mode")
-            resp = _request_with_retry("sendMessage", url, json=payload)
-        resp.raise_for_status()
-    return resp.json()
+        "disable_web_page_preview": "false",
+    })
+    try:
+        return _get_with_retry("sendMessage", url)
+    except Exception:
+        # If Markdown fails, retry as plain text
+        if parse_mode:
+            logger.warning("sendMessage failed with parse_mode, retrying as plain text")
+            url = _api_url("sendMessage", {
+                "chat_id": chat_id,
+                "text": text,
+                "disable_web_page_preview": "false",
+            })
+            return _get_with_retry("sendMessage", url)
+        raise
 
 
-def _send_photo(chat_id: str, image_bytes: bytes, caption: str) -> dict:
-    """Send a photo via multipart upload. Caption is capped at 1024 chars by Telegram."""
-    url = _api_url("sendPhoto")
-    caption = (caption or "")[:1020]
-    files = {"photo": ("image.jpg", image_bytes, "image/jpeg")}
-    data = {"chat_id": chat_id}
-    if caption:
-        data["caption"] = caption
-        data["parse_mode"] = "Markdown"
-    resp = _request_with_retry("sendPhoto", url, data=data, files=files)
-    if resp.status_code != 200:
-        if resp.status_code == 400:
-            logger.warning(f"Photo send failed (400): {resp.text[:300]}")
-            data.pop("parse_mode", None)
-            resp = _request_with_retry("sendPhoto", url, data=data, files=files)
-        resp.raise_for_status()
-    return resp.json()
+def _send_photo_by_url(chat_id: str, image_url: str, caption: str) -> dict:
+    """Send a photo by passing its URL to Telegram.
+
+    Telegram downloads the image directly from the URL — we don't need to
+    upload bytes. This works with GET requests (no multipart upload needed).
+    """
+    url = _api_url("sendPhoto", {
+        "chat_id": chat_id,
+        "photo": image_url,
+        "caption": caption[:1020] if caption else None,
+        "parse_mode": "Markdown" if caption else None,
+    })
+    try:
+        return _get_with_retry("sendPhoto", url)
+    except Exception:
+        logger.warning("sendPhoto failed with parse_mode, retrying as plain text")
+        url = _api_url("sendPhoto", {
+            "chat_id": chat_id,
+            "photo": image_url,
+            "caption": caption[:1020] if caption else None,
+        })
+        return _get_with_retry("sendPhoto", url)
 
 
 def _chunk_text(text: str, limit: int = 4000) -> list[str]:
@@ -186,24 +232,22 @@ def send_article(article: dict, summary: str | None, category: str | None = None
     """
     Send one article to Telegram.
 
-    If summary is None or status is SKIP, only send the photo+caption (no follow-up text).
+    Uses sendPhoto with the image URL (GET) instead of uploading bytes (POST).
+    This is required because HF Spaces can't POST to Cloudflare Workers.
 
     Returns True on success.
     """
-    image_bytes = article.get("image_bytes")
     image_url = article.get("image_url")
     caption = _build_caption(article, category)
 
     try:
-        if image_bytes:
-            _send_photo(cfg.telegram_chat_id, image_bytes, caption)
+        if image_url:
+            # Send photo by URL — Telegram downloads it directly
+            _send_photo_by_url(cfg.telegram_chat_id, image_url, caption)
             logger.info(f"Telegram: sent photo for {article.get('url')}")
         else:
             # No image — send header as text
-            header = caption
-            if image_url:
-                header = f"🖼 [View image]({image_url})\n\n" + header
-            _send_text(cfg.telegram_chat_id, header)
+            _send_text(cfg.telegram_chat_id, caption)
             logger.info(f"Telegram: sent header (no image) for {article.get('url')}")
 
         # Send full summary if available

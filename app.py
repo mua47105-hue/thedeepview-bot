@@ -37,7 +37,7 @@ def _run_in_background():
 @app.on_event("startup")
 def _on_startup() -> None:
     # Start the interactive Telegram command poller in a background thread.
-    # Works on Render (or any normal host) — connects directly to api.telegram.org.
+    # Uses GET for all calls (POST fails to Cloudflare Workers from HF Spaces).
     start_command_poller()
 
 
@@ -256,7 +256,11 @@ async def debug():
     if cfg.telegram_bot_token:
         try:
             base = cfg.telegram_api_base.rstrip("/")
-            with httpx.Client(timeout=httpx.Timeout(connect=10, read=20, write=10, pool=10)) as client:
+            # Use GET with no keepalive (POST fails, keepalive causes SSL EOF)
+            with httpx.Client(
+                timeout=httpx.Timeout(connect=10, read=20, write=10, pool=10),
+                limits=httpx.Limits(max_keepalive_connections=0, max_connections=5, keepalive_expiry=0.0),
+            ) as client:
                 resp = client.get(f"{base}/bot{cfg.telegram_bot_token}/getMe")
             data = resp.json()
             if data.get("ok"):

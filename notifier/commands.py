@@ -1,15 +1,14 @@
 """
 Interactive Telegram bot commands via long-polling.
 
-Runs in a background daemon thread alongside the FastAPI server.
-Responds to: /start, /status, /quota, /latest, /wake, /help
-
-On Render (or any normal host), this works directly with api.telegram.org.
+Uses GET for ALL Telegram API calls (POST fails to Cloudflare Workers from
+HF Spaces). The long-poll loop uses GET getUpdates which works reliably.
 """
 from __future__ import annotations
 
 import threading
 import time
+import urllib.parse
 
 import httpx
 
@@ -24,6 +23,12 @@ _HTTP_TIMEOUT = httpx.Timeout(
     write=10.0,
     pool=10.0,
 )
+# Disable keepalive — Cloudflare Workers close connections after each response
+_HTTP_LIMITS = httpx.Limits(
+    max_keepalive_connections=0,
+    max_connections=10,
+    keepalive_expiry=0.0,
+)
 
 HELP_TEXT = (
     "🤖 *TheDeepView Bot — Commands*\n\n"
@@ -37,17 +42,19 @@ HELP_TEXT = (
 
 
 def _send_text(chat_id: str, text: str, parse_mode: str = "Markdown") -> None:
+    """Send a text message via GET request (POST fails to Cloudflare Workers from HF Spaces)."""
     base = cfg.telegram_api_base.rstrip("/")
-    url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    params = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage?" + urllib.parse.urlencode(params)
     try:
-        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-            resp = client.post(url, json=payload)
-        if resp.status_code == 400:
+        with httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS) as client:
+            resp = client.get(url)
+        if resp.status_code == 400 and parse_mode:
             # Markdown parse failure — retry as plain text
-            payload.pop("parse_mode", None)
-            with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-                client.post(url, json=payload)
+            params.pop("parse_mode", None)
+            url = f"{base}/bot{cfg.telegram_bot_token}/sendMessage?" + urllib.parse.urlencode(params)
+            with httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS) as client:
+                client.get(url)
     except Exception as e:
         logger.warning(f"command reply failed: {e}")
 
@@ -123,22 +130,25 @@ def _handle_update(update: dict) -> None:
 
 
 def _long_poll_loop() -> None:
-    """Run getUpdates in a loop using a persistent httpx.Client."""
+    """Run getUpdates in a loop using GET (POST fails, GET works)."""
     base_url = f"{cfg.telegram_api_base.rstrip('/')}/bot{cfg.telegram_bot_token}/getUpdates"
     offset = 0
     consecutive_errors = 0
-    logger.info(f"Telegram command poller started (base={cfg.telegram_api_base})")
+    logger.info(
+        f"Telegram command poller started (30s long-poll, base={cfg.telegram_api_base})"
+    )
 
-    client = httpx.Client(timeout=_HTTP_TIMEOUT)
+    client = httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS)
 
     while True:
         try:
             params = {
                 "timeout": _TELEGRAM_LONG_POLL_SECONDS,
                 "offset": offset,
-                "allowed_updates": ["message"],
+                "allowed_updates": "message",
             }
-            resp = client.get(base_url, params=params)
+            url = base_url + "?" + urllib.parse.urlencode(params)
+            resp = client.get(url)
             data = resp.json()
             if not data.get("ok"):
                 logger.warning(f"getUpdates not ok: {data}")
@@ -166,7 +176,7 @@ def _long_poll_loop() -> None:
                 client.close()
             except Exception:
                 pass
-            client = httpx.Client(timeout=_HTTP_TIMEOUT)
+            client = httpx.Client(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS)
             _backoff_sleep(consecutive_errors)
 
         except Exception as e:
